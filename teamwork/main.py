@@ -10,7 +10,7 @@ from neptunecontrib.monitoring.utils import send_figure
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-from teamwork.wrappers import ReinforceMultiAgentWrapper
+from teamwork.wrappers import ReinforceMultiAgentWrapper, GumbelSoftmaxMultiAgentWrapper
 
 
 def get_params():
@@ -34,22 +34,22 @@ def get_params():
     parser.add_argument('--receiver_embedding', type=int, default=10,
                         help='Dimensionality of the embedding hidden layer for Receiver (default: 10)')
 
-    parser.add_argument('--sender_entropy_coeff', type=float, default=0.1,
+    parser.add_argument('--sender_entropy_coeff', type=float, default=0.01,
                         help='The entropy regularisation coefficient for Sender (default: 1e-1)')
     parser.add_argument('--executive_sender_entropy_coeff', type=float, default=1e-2,
                         help='The entropy regularisation coefficient for Executive sender (default: 1e-2)')
-    parser.add_argument('--receivers_entropy_coeff', type=float, default=0.1,
+    parser.add_argument('--receivers_entropy_coeff', type=float, default=0.01,
                         help='The entropy regularisation coefficient for Receiver (default: 1e-1)')
 
-    parser.add_argument('--sender_lr', type=float, default=1e-2,
+    parser.add_argument('--sender_lr', type=float, default=0.05,
                         help="Learning rate for Sender's parameters (default: 1e-2)")
-    parser.add_argument('--executive_sender_lr', type=float, default=1e-2,
+    parser.add_argument('--executive_sender_lr', type=float, default=0.05,
                         help="Learning rate for Executive sender's parameters (default: 1e-2)")
-    parser.add_argument('--receiver_lr', type=float, default=1e-2,
+    parser.add_argument('--receiver_lr', type=float, default=0.05,
                         help="Learning rate for Receiver's parameters (default: 1e-2)")
-    parser.add_argument('--seed', type=int, default=17,
+    parser.add_argument('--seed', type=int, default=117,
                         help="Random seed")
-    parser.add_argument('--use_reinforce', type=bool, default=False,
+    parser.add_argument('--use_reinforce', type=bool, default=True,
                         help="Whether to use Reinforce or Gumbel-Softmax for optimizing sender and receiver."
                              "Executive receiver will be always optimized using Reinforce")
     args = core.init(parser)
@@ -81,7 +81,7 @@ class Receiver(nn.Module):
         self.fc1 = core.RelaxedEmbedding(n_features, n_hidden)
 
     def forward(self, x, _input):
-        return self.fc1(x)
+        return self.fc1(x).squeeze(dim=0)
 
 
 def loss(sender_input, _message, _receiver_input, receiver_output, _labels):
@@ -90,21 +90,21 @@ def loss(sender_input, _message, _receiver_input, receiver_output, _labels):
 
 
 def loss_diff(sender_input, _message, _receiver_input, receiver_output, _labels):
-    acc = (receiver_output.argmax(dim=1) == sender_input.argmax(dim=1)).detach().float()
+    acc = (receiver_output.argmax(dim=1) == sender_input.argmax(dim=1)).detach().float().mean(dim=0)
     loss = F.cross_entropy(receiver_output, sender_input.argmax(dim=1), reduction="none")
-    return loss, {'acc': acc}
+    return loss, {'acc': acc.item()}
 
 
 class MultiAgentGame(nn.Module):
 
-    def __init__(self, senders, executive_sender, receivers, loss,
+    def __init__(self, sender, executive_sender, receiver, loss,
                  sender_entropy_coeff=0,
                  receiver_entropy_coeff=0,
                  executive_sender_entropy_coeff=0):
         super(MultiAgentGame, self).__init__()
-        self.senders = senders
+        self.sender = sender
         self.executive_sender = executive_sender
-        self.receivers = receivers
+        self.receiver = receiver
         self.loss = loss
 
         self.receiver_entropy_coeff = receiver_entropy_coeff
@@ -115,32 +115,32 @@ class MultiAgentGame(nn.Module):
         self.n_points = 0.0
 
     def forward(self, sender_input, labels, receiver_input=None):
-        id, executive_sender_log_prob, executive_sender_entropy = self.executive_sender(sender_input)
-        receiver = self.receivers[id.item()]
-        sender = self.senders[id.item()]
+        indices, executive_sender_log_prob, executive_sender_entropy = self.executive_sender(sender_input)
 
         if opts.use_reinforce:
-            message, sender_log_prob, sender_entropy = sender(sender_input)
-            receiver_output, receiver_log_prob, receiver_entropy = receiver(message, receiver_input)
+            message, sender_log_prob, sender_entropy = self.sender(sender_input, indices)
+            receiver_output, receiver_log_prob, receiver_entropy = self.receiver(message, indices, _input=receiver_input)
         else:
-            message = sender(sender_input)
-            receiver_output = receiver(message, receiver_input)
-            receiver_log_prob, sender_log_prob = 0, 0
+            message = self.sender(sender_input, indices)
+            receiver_output = self.receiver(message, indices, _input=receiver_input)
 
         loss, rest_info = self.loss(sender_input, message, receiver_input, receiver_output, labels)
+
         advantage = (loss.detach() - self.mean_baseline)
-        sender_loss = advantage * (sender_log_prob + receiver_log_prob)
-        exec_sender_loss = advantage * (executive_sender_log_prob + receiver_log_prob)
-        receiver_loss = advantage * receiver_log_prob
-        policy_loss = (sender_loss + receiver_loss + exec_sender_loss).mean()
+
 
         if opts.use_reinforce:
+            sender_loss = advantage * (sender_log_prob + receiver_log_prob)
+            exec_sender_loss = advantage * (executive_sender_log_prob + receiver_log_prob)
+            receiver_loss = advantage * receiver_log_prob
+            policy_loss = (sender_loss + receiver_loss + exec_sender_loss).mean()
             entropy_loss = -(
                 sender_entropy.mean() * self.sender_entropy_coeff +
                 receiver_entropy.mean() * self.receiver_entropy_coeff +
                 executive_sender_entropy.mean() * self.executive_sender_entropy_coeff
             )
         else:
+            policy_loss = (advantage * executive_sender_log_prob).mean()
             entropy_loss = -executive_sender_entropy.mean() * self.executive_sender_entropy_coeff
 
         if self.training:
@@ -166,13 +166,14 @@ class NeptuneMonitor:
         self.game = game
 
     def log(self, mode, epoch, loss, rest):
+        return
         self.experiment.send_metric(f'{mode}_loss', loss)
         for metric, value in rest.items():
             self.experiment.send_metric(f'{mode}_{metric}', value)
 
         self.save_codebook(
             weight_list=[F.softmax(sender.agent.fc1.weight.detach(), dim=0).numpy()
-                         for sender in self.game.senders],
+                         for sender in self.game.sender.agents],
             epoch=epoch,
             label='Sender softmax'
         )
@@ -183,14 +184,14 @@ class NeptuneMonitor:
         )
         self.save_codebook(
             weight_list=[F.softmax(receiver.agent.fc1.weight.detach(), dim=1).numpy()
-                         for receiver in self.game.receivers],
+                         for receiver in self.game.receiver.agents],
             epoch=epoch,
             label='Receiver softmax'
         )
 
         self.save_codebook(
             weight_list=[sender.agent.fc1.weight.detach().numpy()
-                         for sender in self.game.senders],
+                         for sender in self.game.sender.agents],
             epoch=epoch,
             label='Sender'
         )
@@ -201,7 +202,7 @@ class NeptuneMonitor:
         )
         self.save_codebook(
             weight_list=[receiver.agent.fc1.weight.detach().numpy()
-                         for receiver in self.game.receivers],
+                         for receiver in self.game.receiver.agents],
             epoch=epoch,
             label='Receiver'
         )
@@ -227,39 +228,6 @@ class CustomTrainer(core.Trainer):
                 self.monitor.log('validation', epoch, validation_loss, rest)
                 print(f'validation: epoch {epoch}, loss {validation_loss},  {rest}', flush=True)
 
-    def train_epoch(self):
-
-        def _add_dicts(a, b):
-            result = dict(a)
-            for k, v in b.items():
-                result[k] = result.get(k, 0) + v
-            return result
-
-        def _div_dict(d, n):
-            result = dict(d)
-            for k in result:
-                result[k] /= n
-            return result
-
-        mean_loss = 0
-        mean_rest = {}
-        n_batches = 0
-        self.game.train()
-        for i, batch in enumerate(self.train_data):
-            if i % 10 == 0:
-                self.optimizer.zero_grad()
-            optimized_loss, rest = self.game(*batch)
-            mean_rest = _add_dicts(mean_rest, rest)
-            optimized_loss.backward()
-            if i % 10 == 0:
-                self.optimizer.step()
-            n_batches += 1
-            mean_loss += optimized_loss
-
-        mean_loss /= n_batches
-        mean_rest = _div_dict(mean_rest, n_batches)
-        return mean_loss, mean_rest
-
 
 if __name__ == "__main__":
     opts = get_params()
@@ -270,16 +238,20 @@ if __name__ == "__main__":
     if opts.use_reinforce:
         senders = [core.ReinforceWrapper(Sender(opts.alphabet_size, opts.n_features))
                    for _ in range(opts.receiver_population_size)]
+        sender = ReinforceMultiAgentWrapper(agents=senders)
         receivers = [core.ReinforceWrapper(Receiver(opts.n_features, opts.alphabet_size))
                      for _ in range(opts.receiver_population_size)]
+        receiver = ReinforceMultiAgentWrapper(agents=receivers)
     else:
         senders = [core.GumbelSoftmaxWrapper(Sender(opts.alphabet_size, opts.n_features))
                    for _ in range(opts.receiver_population_size)]
+        sender = GumbelSoftmaxMultiAgentWrapper(agents=senders)
         receivers = [core.GumbelSoftmaxWrapper(Receiver(opts.n_features, opts.alphabet_size))
                      for _ in range(opts.receiver_population_size)]
+        receiver = GumbelSoftmaxMultiAgentWrapper(agents=receivers)
     executive_sender = core.ReinforceWrapper(ExecutiveSender(opts.receiver_population_size, opts.n_features))
 
-    game = MultiAgentGame(senders, executive_sender, receivers,
+    game = MultiAgentGame(sender, executive_sender, receiver,
                           loss if opts.use_reinforce else loss_diff,
                           opts.sender_entropy_coeff,
                           opts.executive_sender_entropy_coeff,
