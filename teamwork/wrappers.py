@@ -20,17 +20,6 @@ class ReinforceMultiAgentWrapper(nn.Module):
         super(ReinforceMultiAgentWrapper, self).__init__()
         self.agents = agents
 
-    # def forward(self, input, agent_indices, **kwargs):
-    #     batch_size = input.size(0)
-    #     samples, log_probs, entropies = [], [], []
-    #     for agent_index, agent in enumerate(self.agents):
-    #         sample, log_prob, entropy = agent(input, **kwargs)
-    #         mask = (torch.LongTensor([agent_index]).expand(batch_size) == agent_indices)
-    #         samples.append(sample * mask.long())
-    #         log_probs.append(log_prob * mask.float())
-    #         entropies.append(entropy * mask.float())
-    #     return torch.stack(samples).sum(dim=0), torch.stack(log_probs).sum(dim=0), torch.stack(entropies).sum(dim=0)
-
     def forward(self, input, agent_indices, **kwargs):
         agent_indices = agent_indices.unsqueeze(dim=0)
         samples, log_probs, entropies = zip(*(agent(input, **kwargs) for agent in self.agents))
@@ -47,36 +36,22 @@ class GumbelSoftmaxMultiAgentWrapper(nn.Module):
         self.agents = agents
 
     def forward(self, input, agent_indices, **kwargs):
-        batch_size = input.size(0)
-        samples = []
-        for agent_index, agent in enumerate(self.agents):
-            sample = agent(input, **kwargs)
-            mask = (torch.LongTensor([agent_index]).expand(batch_size) == agent_indices)
-            if self.training:
-                mask = mask.float()
-            else:
-                mask = mask.long()
-            samples.append(sample)
-        return torch.stack(samples).sum(dim=0)
+        samples = [agent(input, **kwargs) for agent in self.agents]
+        agent_indices = agent_indices.reshape(1, agent_indices.size(0), 1).expand(1, agent_indices.size(0), samples[0].size(1))
+        samples = torch.stack(samples, dim=0).gather(dim=0, index=agent_indices)
+        return samples.squeeze(dim=0)
 
-    def forward(self, input, agent_indices, **kwargs):
-        samples = torch.stack([agent(input, **kwargs) for agent in self.agents], dim=1)
-
-        print(samples.shape)
-        print(agent_indices.shape)
-
-        samples = samples.gather(dim=0, index=agent_indices)
-        return samples
 
 if __name__ == "__main__":
-    multi_agent = ReinforceMultiAgentWrapper(agents=[core.ReinforceWrapper(Sender(10, 10)),
-                                                     core.ReinforceWrapper(Sender(10, 10))])
-    samples, log_probs, entropies = multi_agent(torch.Tensor(8, 10),
-                                                agent_indices=torch.LongTensor([0, 1, 0, 1, 0, 1, 0, 1]))
-    print(samples, log_probs, entropies)
-    # assert samples.shape == log_probs.shape == entropies.shape == torch.Size([8])
-    #
-    # multi_agent = GumbelSoftmaxMultiAgentWrapper(agents=[core.GumbelSoftmaxWrapper(Sender(10, 10)),
-    #                                                      core.GumbelSoftmaxWrapper(Sender(10, 10))])
-    # samples = multi_agent(torch.Tensor(8, 10), agent_indices=torch.LongTensor([0, 1, 0, 1, 0, 1, 0, 1]))
-    # assert samples.shape == torch.Size([8, 10])
+    BATCH_SIZE, INPUT_SIZE, OUTPUT_SIZE = 8, 10, 5
+    AGENT_INDICES = torch.LongTensor([0, 1, 0, 1, 0, 1, 0, 1])
+    multi_agent = ReinforceMultiAgentWrapper(agents=[core.ReinforceWrapper(Sender(OUTPUT_SIZE, INPUT_SIZE)),
+                                                     core.ReinforceWrapper(Sender(OUTPUT_SIZE, INPUT_SIZE))])
+    samples, log_probs, entropies = multi_agent(torch.Tensor(BATCH_SIZE, INPUT_SIZE),
+                                                agent_indices=AGENT_INDICES)
+    assert samples.shape == log_probs.shape == entropies.shape == torch.Size([BATCH_SIZE])
+
+    multi_agent = GumbelSoftmaxMultiAgentWrapper(agents=[core.GumbelSoftmaxWrapper(Sender(OUTPUT_SIZE, INPUT_SIZE)),
+                                                         core.GumbelSoftmaxWrapper(Sender(OUTPUT_SIZE, INPUT_SIZE))])
+    samples = multi_agent(torch.Tensor(BATCH_SIZE, INPUT_SIZE), agent_indices=AGENT_INDICES)
+    assert samples.shape == torch.Size([BATCH_SIZE, OUTPUT_SIZE])

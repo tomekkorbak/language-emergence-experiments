@@ -49,7 +49,7 @@ def get_params():
                         help="Learning rate for Receiver's parameters (default: 1e-2)")
     parser.add_argument('--seed', type=int, default=117,
                         help="Random seed")
-    parser.add_argument('--use_reinforce', type=bool, default=True,
+    parser.add_argument('--use_reinforce', type=bool, default=False,
                         help="Whether to use Reinforce or Gumbel-Softmax for optimizing sender and receiver."
                              "Executive receiver will be always optimized using Reinforce")
     args = core.init(parser)
@@ -166,7 +166,6 @@ class NeptuneMonitor:
         self.game = game
 
     def log(self, mode, epoch, loss, rest):
-        return
         self.experiment.send_metric(f'{mode}_loss', loss)
         for metric, value in rest.items():
             self.experiment.send_metric(f'{mode}_{metric}', value)
