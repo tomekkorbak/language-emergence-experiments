@@ -24,12 +24,12 @@ class GSSequentialTeamworkGame(nn.Module):
         self.mean_baseline = 0.0
         self.n_points = 0.0
 
-    def forward(self, sender_input, _):
+    def forward(self, sender_input, target):
         indices, executive_sender_log_prob, executive_sender_entropy = self.executive_sender(sender_input)
         message = self.sender_ensemble(sender_input, agent_indices=indices)
         receiver_output = self.receiver_ensemble(message, agent_indices=indices)[:, -1, ...]
 
-        loss, rest_info = self.loss(sender_input, message, None, receiver_output, None)
+        loss, rest_info = self.loss(sender_input, message, None, receiver_output, target)
         advantage = (loss.detach() - self.mean_baseline)
         policy_loss = (advantage * executive_sender_log_prob).mean()
         entropy_loss = -executive_sender_entropy.mean() * self.executive_sender_entropy_coeff

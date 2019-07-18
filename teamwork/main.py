@@ -2,20 +2,23 @@ import argparse
 
 import torch
 import torch.nn.functional as F
+from torch.utils.data import DataLoader
 from egg import core
-from egg.zoo.simple_autoenc.features import OneHotLoader
 import neptune
 from neptunecontrib.api.utils import get_filepaths
 
-from teamwork.wrappers import GumbelSoftmaxMultiAgentEnsemble,  GSSequentialTeamworkGame
+from teamwork.wrappers import GumbelSoftmaxMultiAgentEnsemble, GSSequentialTeamworkGame
 from teamwork.callbacks import NeptuneMonitor
 from teamwork.agents import Sender, ExecutiveSender, Receiver
+from teamwork.data import TupleDataset
 
 
 def get_params():
     parser = argparse.ArgumentParser()
     parser.add_argument('--n_features', type=int, default=10,
                         help='Dimensionality of the "concept" space (default: 10)')
+    parser.add_argument('--n_attributes', type=int, default=2,
+                        help='Number of attributes (default: 2')
     parser.add_argument('--batches_per_epoch', type=int, default=1000,
                         help='Number of batches per epoch (default: 1)')
     parser.add_argument('--population_size', type=int, default=2,
@@ -42,7 +45,7 @@ def get_params():
                         help="Random seed")
     parser.add_argument('--use_reinforce', type=bool, default=False,
                         help="Whether to use Reinforce or Gumbel-Softmax for optimizing sender and receiver."
-                            "Executive receiver will be always optimized using Reinforce")
+                             "Executive receiver will be always optimized using Reinforce")
     parser.add_argument('--config', type=str, default=None)
 
     args = core.init(parser)
@@ -50,21 +53,22 @@ def get_params():
     return args
 
 
-def loss_diff(sender_input, _message, _receiver_input, receiver_output, _labels):
-    acc = (receiver_output.argmax(dim=1) == sender_input.argmax(dim=1)).detach().float().mean(dim=0)
-    loss = F.cross_entropy(receiver_output, sender_input.argmax(dim=1), reduction="none")
+def loss_diff(sender_input, _message, _receiver_input, receiver_output, target):
+    acc = (receiver_output.argmax(dim=1) == target).detach().float().mean(dim=0)
+    loss = F.cross_entropy(receiver_output, target, reduction="none")
     return loss, {'acc': acc.item()}
 
 
 if __name__ == "__main__":
     opts = get_params()
-    train_loader = OneHotLoader(n_features=opts.n_features, batch_size=opts.batch_size,
-                                batches_per_epoch=opts.batches_per_epoch)
-    test_loader = OneHotLoader(n_features=opts.n_features, batch_size=opts.batch_size,
-                               batches_per_epoch=opts.batches_per_epoch, seed=opts.seed)
+    perceptual_dimensions = [opts.n_features for _ in range(opts.n_attributes)]
+    train, dev = TupleDataset.create_train_and_dev(perceptual_dimensions=perceptual_dimensions)
+    train_loader = DataLoader(train, batch_size=opts.batch_size, drop_last=True, shuffle=True)
+    test_loader = DataLoader(dev, batch_size=opts.batch_size, drop_last=True, shuffle=False)
+
     senders = [
         core.RnnSenderGS(
-            agent=Sender(opts.sender_hidden, opts.n_features),
+            agent=Sender(opts.sender_hidden, opts.n_features, opts.n_attributes),
             vocab_size=opts.vocab_size,
             emb_dim=opts.sender_embedding,
             n_hidden=opts.sender_hidden,
@@ -74,13 +78,13 @@ if __name__ == "__main__":
     sender_ensemble = GumbelSoftmaxMultiAgentEnsemble(agents=senders)
     receivers = [
         core.RnnReceiverGS(
-            agent=Receiver(opts.n_features, opts.receiver_hidden),
+            agent=Receiver(opts.receiver_hidden, 100),
             vocab_size=opts.vocab_size,
             emb_dim=opts.receiver_embedding,
             n_hidden=opts.receiver_hidden)
         for _ in range(opts.population_size)]
     receiver_ensemble = GumbelSoftmaxMultiAgentEnsemble(agents=receivers)
-    executive_sender = core.ReinforceWrapper(ExecutiveSender(opts.population_size, opts.n_features))
+    executive_sender = core.ReinforceWrapper(ExecutiveSender(opts.population_size, opts.n_features, opts.n_attributes))
 
     game = GSSequentialTeamworkGame(sender_ensemble, receiver_ensemble, executive_sender, loss_diff,
                                     opts.executive_sender_entropy_coeff)
@@ -92,5 +96,5 @@ if __name__ == "__main__":
     neptune.init('tomekkorbak/teamwork')
     with neptune.create_experiment(params=vars(opts), upload_source_files=get_filepaths(), tags=['grid5']) as experiment:
         trainer = core.Trainer(game=game, optimizer=optimizer, train_data=train_loader, validation_data=test_loader,
-                               callbacks=[NeptuneMonitor(experiment=experiment), core.ConsoleLogger()])
+                               callbacks=[NeptuneMonitor(experiment=experiment), core.ConsoleLogger(print_train_loss=True)])
         trainer.train(n_epochs=opts.n_epochs)
