@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from egg import core
 from egg.zoo.simple_autoenc.features import OneHotLoader
 import neptune
-
+from neptunecontrib.api.utils import get_filepaths
 
 from teamwork.wrappers import GumbelSoftmaxMultiAgentEnsemble,  GSSequentialTeamworkGame
 from teamwork.callbacks import NeptuneMonitor
@@ -42,7 +42,9 @@ def get_params():
                         help="Random seed")
     parser.add_argument('--use_reinforce', type=bool, default=False,
                         help="Whether to use Reinforce or Gumbel-Softmax for optimizing sender and receiver."
-                             "Executive receiver will be always optimized using Reinforce")
+                            "Executive receiver will be always optimized using Reinforce")
+    parser.add_argument('--config', type=str, default=None)
+
     args = core.init(parser)
     print(args)
     return args
@@ -88,7 +90,7 @@ if __name__ == "__main__":
     optimizer = torch.optim.Adam(sender_params + receivers_params + executive_sender_params)
 
     neptune.init('tomekkorbak/teamwork')
-    with neptune.create_experiment(params=vars(opts), upload_source_files=[__file__]) as experiment:
+    with neptune.create_experiment(params=vars(opts), upload_source_files=get_filepaths(), tags=['grid5']) as experiment:
         trainer = core.Trainer(game=game, optimizer=optimizer, train_data=train_loader, validation_data=test_loader,
                                callbacks=[NeptuneMonitor(experiment=experiment), core.ConsoleLogger()])
         trainer.train(n_epochs=opts.n_epochs)
