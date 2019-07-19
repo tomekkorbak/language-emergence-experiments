@@ -8,7 +8,7 @@ import neptune
 from neptunecontrib.api.utils import get_filepaths
 
 from teamwork.wrappers import GumbelSoftmaxMultiAgentEnsemble, GSSequentialTeamworkGame
-from teamwork.callbacks import NeptuneMonitor
+from teamwork.callbacks import NeptuneMonitor, Dump
 from teamwork.agents import Sender, ExecutiveSender, Receiver
 from teamwork.data import TupleDataset
 
@@ -53,10 +53,10 @@ def get_params():
     return args
 
 
-def loss_diff(sender_input, _message, _receiver_input, receiver_output, target):
+def loss_diff(target, receiver_output, idx):
     acc = (receiver_output.argmax(dim=1) == target).detach().float().mean(dim=0)
     loss = F.cross_entropy(receiver_output, target, reduction="none")
-    return loss, {'acc': acc.item()}
+    return loss, {f'accuracy_{idx}': acc.item()}
 
 
 if __name__ == "__main__":
@@ -76,25 +76,36 @@ if __name__ == "__main__":
             temperature=1)
         for _ in range(opts.population_size)]
     sender_ensemble = GumbelSoftmaxMultiAgentEnsemble(agents=senders)
-    receivers = [
+    receivers_1 = [
         core.RnnReceiverGS(
-            agent=Receiver(opts.receiver_hidden, 100),
+            agent=Receiver(opts.receiver_hidden, 100, 2),
             vocab_size=opts.vocab_size,
             emb_dim=opts.receiver_embedding,
             n_hidden=opts.receiver_hidden)
         for _ in range(opts.population_size)]
-    receiver_ensemble = GumbelSoftmaxMultiAgentEnsemble(agents=receivers)
+    receiver_ensemble_1 = GumbelSoftmaxMultiAgentEnsemble(agents=receivers_1)
+    receivers_2 = [
+        core.RnnReceiverGS(
+            agent=Receiver(opts.receiver_hidden, 100, 2),
+            vocab_size=opts.vocab_size,
+            emb_dim=opts.receiver_embedding,
+            n_hidden=opts.receiver_hidden)
+        for _ in range(opts.population_size)]
+    receiver_ensemble_2 = GumbelSoftmaxMultiAgentEnsemble(agents=receivers_2)
     executive_sender = core.ReinforceWrapper(ExecutiveSender(opts.population_size, opts.n_features, opts.n_attributes))
 
-    game = GSSequentialTeamworkGame(sender_ensemble, receiver_ensemble, executive_sender, loss_diff,
+    game = GSSequentialTeamworkGame(sender_ensemble, receiver_ensemble_1, receiver_ensemble_2, executive_sender, loss_diff,
                                     opts.executive_sender_entropy_coeff)
     sender_params = [{'params': sender_ensemble.parameters(), 'lr': opts.sender_lr}]
     executive_sender_params = [{'params': executive_sender.parameters(), 'lr': opts.executive_sender_lr}]
-    receivers_params = [{'params': receiver_ensemble.parameters(), 'lr': opts.receiver_lr}]
+    receivers_params = [{'params': receiver_ensemble_1.parameters(), 'lr': opts.receiver_lr},
+                        {'params': receiver_ensemble_2.parameters(), 'lr': opts.receiver_lr}]
     optimizer = torch.optim.Adam(sender_params + receivers_params + executive_sender_params)
 
-    neptune.init('tomekkorbak/teamwork')
-    with neptune.create_experiment(params=vars(opts), upload_source_files=get_filepaths(), tags=['grid5']) as experiment:
+    neptune.init('tomekkorbak/compositionality')
+    with neptune.create_experiment(params=vars(opts), upload_source_files=get_filepaths()) as experiment:
         trainer = core.Trainer(game=game, optimizer=optimizer, train_data=train_loader, validation_data=test_loader,
-                               callbacks=[NeptuneMonitor(experiment=experiment), core.ConsoleLogger(print_train_loss=True)])
+                               callbacks=[Dump(experiment, test_loader),
+                                          NeptuneMonitor(experiment=experiment),
+                                          core.ConsoleLogger(print_train_loss=True)])
         trainer.train(n_epochs=opts.n_epochs)

@@ -29,12 +29,14 @@ class ExecutiveSender(nn.Module):
 
 
 class Receiver(nn.Module):
-    def __init__(self, n_hidden, n_outputs):
+    def __init__(self, n_hidden, n_features, n_attributes):
         super(Receiver, self).__init__()
-        self.fc1 = nn.Linear(n_hidden, n_outputs)
+        self.fc1 = nn.Linear(n_hidden, n_features*2)
+        self.fc2 = nn.Linear(n_features*2, n_features)
 
-    def forward(self, x, _input):
-        return self.fc1(x).squeeze(dim=0)
+    def forward(self, input, _):
+        hidden = torch.nn.functional.relu(self.fc1(input))
+        return self.fc2(hidden).squeeze(dim=0)
 
 
 if __name__ == "__main__":

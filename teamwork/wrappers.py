@@ -9,14 +9,16 @@ class GSSequentialTeamworkGame(nn.Module):
     def __init__(
             self,
             sender_ensemble: 'GumbelSoftmaxMultiAgentEnsemble',
-            receiver_ensemble: 'GumbelSoftmaxMultiAgentEnsemble',
+            first_receiver_ensemble: 'GumbelSoftmaxMultiAgentEnsemble',
+            second_receiver_ensemble: 'GumbelSoftmaxMultiAgentEnsemble',
             executive_sender: nn.Module,
             loss,
             executive_sender_entropy_coeff=0.1
     ):
         super(GSSequentialTeamworkGame, self).__init__()
         self.sender_ensemble = sender_ensemble
-        self.receiver_ensemble = receiver_ensemble
+        self.first_receiver_ensemble = first_receiver_ensemble
+        self.second_receiver_ensemble = second_receiver_ensemble
         self.executive_sender = executive_sender
         self.loss = loss
         self.executive_sender_entropy_coeff = executive_sender_entropy_coeff
@@ -27,9 +29,12 @@ class GSSequentialTeamworkGame(nn.Module):
     def forward(self, sender_input, target):
         indices, executive_sender_log_prob, executive_sender_entropy = self.executive_sender(sender_input)
         message = self.sender_ensemble(sender_input, agent_indices=indices)
-        receiver_output = self.receiver_ensemble(message, agent_indices=indices)[:, -1, ...]
-
-        loss, rest_info = self.loss(sender_input, message, None, receiver_output, target)
+        first_receiver_output = self.first_receiver_ensemble(message, agent_indices=indices)[:, -1, ...]
+        second_receiver_output = self.second_receiver_ensemble(message, agent_indices=indices)[:, -1, ...]
+        loss_1, rest_info_1 = self.loss(target[0], first_receiver_output, idx=1)
+        loss_2, rest_info_2 = self.loss(target[1], second_receiver_output, idx=2)
+        loss, rest_info = loss_1 + loss_2, {**rest_info_1, **rest_info_2}
+        rest_info['accuracy'] = (rest_info['accuracy_1'] + rest_info['accuracy_2'])/2
         advantage = (loss.detach() - self.mean_baseline)
         policy_loss = (advantage * executive_sender_log_prob).mean()
         entropy_loss = -executive_sender_entropy.mean() * self.executive_sender_entropy_coeff

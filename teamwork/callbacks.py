@@ -30,20 +30,6 @@ class NeptuneMonitor(Callback):
             label='Executive sender softmax'
         )
 
-    def on_train_end(self):
-        dataset = torch.eye(10, 10)
-        indices, _, _ = self.trainer.game.executive_sender(dataset)
-        message = self.trainer.game.sender_ensemble(dataset, indices)
-        receiver_output = self.trainer.game.receiver_ensemble(message, indices)[:, -1, ...]
-        for i in range(10):
-            neptune.send_text(
-                'messages',
-                f'{dataset[i].argmax(dim=0).item()} -> '
-                f'{indices[i].item()} -> '
-                f'{message[i].argmax(dim=1).tolist()} -> '
-                f'{receiver_output[i].argmax(dim=0).item()}'
-            )
-
     def save_codebook(self, weight_list, epoch, label):
         figure, axes = plt.subplots(1, 3, sharey=True, figsize=(20, 5))
         figure.suptitle(f'Epoch {epoch}')
@@ -52,3 +38,33 @@ class NeptuneMonitor(Callback):
             g.set_title(f'{label} {i}')
         send_figure(figure)
         plt.close()
+
+
+class Dump(Callback):
+
+    def __init__(self, experiment, test_set):
+        self.experiment = experiment
+        self.test_set = test_set
+
+    def on_epoch_end(self, *args):
+        with torch.no_grad():
+            mapping = {}
+            for (input_1, input_2), targets in self.test_set:
+                indices, _, _ = self.trainer.game.executive_sender((input_1, input_2))
+                message = self.trainer.game.sender_ensemble((input_1, input_2), indices)
+                receiver_output_1 = self.trainer.game.first_receiver_ensemble(message, indices)[:, -1, ...]
+                receiver_output_2 = self.trainer.game.second_receiver_ensemble(message, indices)[:, -1, ...]
+
+                for i in range(input_1.size(0)):
+                    neptune.send_text(
+                        'messages',
+                        f'{input_1[i].argmax(dim=0).item()} & {input_2[i].argmax(dim=0).item()} -> '
+                        f'{indices[i].item()} -> '
+                        f'{message[i].argmax(dim=1).tolist()} -> '
+                        f'{receiver_output_1[i].argmax(dim=0).item()} & {receiver_output_2[i].argmax(dim=0).item()} '
+                        f'(expected {targets[0][i]} & {targets[1][i]})'
+                    )
+                    mapping[(input_1[i].argmax(dim=0).item(), input_2[i].argmax(dim=0).item())] = f'{message[i].argmax(dim=1).tolist()}'
+                    if len(mapping) == 10:
+                        neptune.send_text('mapping', str(mapping))
+                        return
