@@ -1,10 +1,15 @@
+import collections
+
 from neptunecontrib.monitoring.utils import send_figure
 import neptune
 import seaborn as sns
 import matplotlib.pyplot as plt
 from egg.core import Callback
 import torch
-import torch.nn.functional as F
+from tabulate import tabulate
+
+
+Rollout = collections.namedtuple('Rollout', field_names=['input', 'message'])
 
 
 class NeptuneMonitor(Callback):
@@ -15,20 +20,15 @@ class NeptuneMonitor(Callback):
 
     def on_epoch_end(self, loss, rest):
         self.epoch_counter += 1
-        self.experiment.send_metric(f'test_loss', loss)
-        for metric, value in rest.items():
-            self.experiment.send_metric(f'train_{metric}', value)
+        if self.epoch_counter % 10 == 0:
+            self.experiment.send_metric(f'test_loss', loss)
+            for metric, value in rest.items():
+                self.experiment.send_metric(f'train_{metric}', value)
 
     def on_test_end(self, loss, rest):
         self.experiment.send_metric(f'test_loss', loss)
         for metric, value in rest.items():
             self.experiment.send_metric(f'test_{metric}', value)
-
-        self.save_codebook(
-            weight_list=[F.softmax(self.trainer.game.executive_sender.agent.fc1.weight.detach(), dim=0).numpy()],
-            epoch=self.epoch_counter,
-            label='Executive sender softmax'
-        )
 
     def save_codebook(self, weight_list, epoch, label):
         figure, axes = plt.subplots(1, 3, sharey=True, figsize=(20, 5))
@@ -36,35 +36,94 @@ class NeptuneMonitor(Callback):
         for i, (matrix, ax) in enumerate(zip(weight_list, axes)):
             g = sns.heatmap(matrix, annot=True, fmt='.2f', ax=ax)
             g.set_title(f'{label} {i}')
-        send_figure(figure)
+        send_figure(figure, channel_name=label)
         plt.close()
 
 
-class Dump(Callback):
+class CompositionalityMeasurer(Callback):
 
-    def __init__(self, experiment, test_set):
+    def __init__(self, experiment, dataset, opts, test_indices):
         self.experiment = experiment
-        self.test_set = test_set
+        self.dataset = dataset
+        self.epoch_counter = 0
+        self.opts = opts
+        self.test_indices = test_indices
 
     def on_epoch_end(self, *args):
-        with torch.no_grad():
-            mapping = {}
-            for (input_1, input_2), targets in self.test_set:
-                indices, _, _ = self.trainer.game.executive_sender((input_1, input_2))
-                message = self.trainer.game.sender_ensemble((input_1, input_2), indices)
-                receiver_output_1 = self.trainer.game.first_receiver_ensemble(message, indices)[:, -1, ...]
-                receiver_output_2 = self.trainer.game.second_receiver_ensemble(message, indices)[:, -1, ...]
+        self.epoch_counter += 1
+        if self.epoch_counter % 100 == 0:
+            self.counter = collections.Counter()
+            self.input_to_message = collections.defaultdict(list)
+            self.message_to_output = collections.defaultdict(list)
+            train_state = self.trainer.game.training  # persist so we restore it back
+            self.trainer.game.train(mode=False)
+            for _ in range(10):
+                self.run_inference()
+            self.concept_symbol_matrix = self.compute_concept_symbol_matrix()
+            self.trainer.game.train(mode=train_state)
+            self.print_table_input_to_message()
+            self.draw_concept_symbol_matrix()
+            self.experiment.send_metric('context independence', self.compute_context_independence())
 
-                for i in range(input_1.size(0)):
-                    neptune.send_text(
-                        'messages',
-                        f'{input_1[i].argmax(dim=0).item()} & {input_2[i].argmax(dim=0).item()} -> '
-                        f'{indices[i].item()} -> '
-                        f'{message[i].argmax(dim=1).tolist()} -> '
-                        f'{receiver_output_1[i].argmax(dim=0).item()} & {receiver_output_2[i].argmax(dim=0).item()} '
-                        f'(expected {targets[0][i]} & {targets[1][i]})'
-                    )
-                    mapping[(input_1[i].argmax(dim=0).item(), input_2[i].argmax(dim=0).item())] = f'{message[i].argmax(dim=1).tolist()}'
-                    if len(mapping) == 10:
-                        neptune.send_text('mapping', str(mapping))
-                        return
+    def run_inference(self):
+        with torch.no_grad():
+            inputs, targets = self.dataset.tensors
+            indices, _, _ = self.trainer.game.executive_sender(inputs)
+            messages = self.trainer.game.sender_ensemble(inputs, indices)
+            receiver_output_1 = self.trainer.game.first_receiver_ensemble(messages, indices)[:, -1, ...]
+            receiver_output_2 = self.trainer.game.second_receiver_ensemble(messages, indices)[:, -1, ...]
+            for i in range(inputs.size(0)):
+                input = tuple(inputs[i].argmax(dim=1).tolist())
+                index = indices[i].item()
+                message = tuple(messages[i].argmax(dim=1).tolist())
+                output = tuple([receiver_output_1[i].argmax(dim=0).item(), receiver_output_2[i].argmax(dim=0).item()])
+                target = tuple(targets[i].tolist())
+                if i == 0:
+                    neptune.send_text('messages', f'{input} -> {index} -> {message} -> {output} (expected {target})')
+                self.counter[Rollout(input, message)] += 1
+                self.input_to_message[input].append(message)
+                self.message_to_output[message].append(output)
+
+    def print_table_input_to_message(self):
+        table_data = [['x'] + list(range(self.opts.n_features))] + [[i] + [None] * self.opts.n_features for i in range(self.opts.n_features)]
+        for (input1, input2), messages in self.input_to_message.items():
+            table_data[input1 + 1][input2 + 1] = ' '.join((''.join((str(s) for s in message)) for message in set(messages)))
+        for a, b in zip(range(self.opts.n_features), self.test_indices):
+            table_data[a+1][(b % self.opts.n_features) + 1] = '*' + table_data[a+1][(b % self.opts.n_features) +1]
+        filename = f'input_to_message_{self.epoch_counter}'
+        with open(file=filename, mode='w', encoding='utf-8') as file:
+            file.write(tabulate(table_data, tablefmt='fancy_grid'))
+        self.experiment.log_artifact(filename)
+
+    def compute_concept_symbol_matrix(self, epsilon=1e-4):
+        concept_to_message = collections.defaultdict(list)
+        for (concept1, concept2), messages in self.input_to_message.items():
+                concept_to_message[concept1] += messages
+                concept_to_message[self.opts.n_features + concept2] += messages
+        concept_symbol_matrix = torch.FloatTensor(self.opts.n_features * self.opts.n_attributes,
+                                                  self.opts.vocab_size).fill_(epsilon)
+        for concept, messages in concept_to_message.items():
+            for message in messages:
+                for symbol in message:
+                    concept_symbol_matrix[concept, symbol] += 1
+        return concept_symbol_matrix
+
+    def compute_context_independence(self):
+        v_cs = self.concept_symbol_matrix.argmax(dim=1)
+        context_independence_scores = torch.zeros(self.opts.n_features * self.opts.n_attributes)
+        for concept in range(self.concept_symbol_matrix.size(0)):
+            v_c = v_cs[concept]
+            p_vc_c = self.concept_symbol_matrix[concept, v_c]/self.concept_symbol_matrix[concept, :].sum(dim=0)
+            p_c_vc = self.concept_symbol_matrix[concept, v_c]/self.concept_symbol_matrix[:, v_c].sum(dim=0)
+            context_independence_scores[concept] = p_vc_c * p_c_vc
+        neptune.send_text('v_cs', str(v_cs.tolist()))
+        neptune.send_text('context independence scores', str(context_independence_scores.tolist()))
+        return context_independence_scores.mean(dim=0)
+
+    def draw_concept_symbol_matrix(self):
+        figure, ax = plt.subplots(figsize=(20, 5))
+        figure.suptitle(f'Concept-symbol matrix {self.epoch_counter}')
+        g = sns.heatmap(self.concept_symbol_matrix.numpy(), annot=True, fmt='.2f', ax=ax)
+        g.set_title(f'Concept-symbol matrix {self.epoch_counter}')
+        send_figure(figure, channel_name='concept_symbol_matrix')
+        plt.close()

@@ -1,3 +1,4 @@
+tabulate
 psutil
 altair==2.3.0
 appnope==0.1.0

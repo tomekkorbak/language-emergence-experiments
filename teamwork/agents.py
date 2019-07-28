@@ -7,12 +7,12 @@ import torch.nn as nn
 class Sender(nn.Module):
     def __init__(self, n_hidden, n_features, n_attributes):
         super(Sender, self).__init__()
-        self.fc1 = nn.Linear(n_attributes*n_features, n_attributes*n_features*2)
-        self.fc2 = nn.Linear(n_attributes*n_features*2, n_hidden)
+        self.fc1 = nn.Linear(n_attributes*n_features, n_attributes*n_features)
+        self.fc2 = nn.Linear(n_attributes*n_features, n_hidden)
 
-    def forward(self, input: Tuple[torch.Tensor, torch.Tensor]):
-        input = torch.cat(input, dim=1)
-        hidden = torch.nn.functional.relu(self.fc1(input))
+    def forward(self, input):
+        input = input.flatten(1, 2)
+        hidden = torch.nn.functional.leaky_relu(self.fc1(input))
         return self.fc2(hidden)
 
 
@@ -23,19 +23,19 @@ class ExecutiveSender(nn.Module):
         self.fc2 = nn.Linear(n_attributes*n_features*2, n_choices)
 
     def forward(self, input):
-        input = torch.cat(input, dim=1)
-        hidden = torch.nn.functional.relu(self.fc1(input))
+        input = input.flatten(1, 2)
+        hidden = torch.nn.functional.leaky_relu(self.fc1(input))
         return self.fc2(hidden)
 
 
 class Receiver(nn.Module):
     def __init__(self, n_hidden, n_features, n_attributes):
         super(Receiver, self).__init__()
-        self.fc1 = nn.Linear(n_hidden, n_features*2)
-        self.fc2 = nn.Linear(n_features*2, n_features)
+        self.fc1 = nn.Linear(n_hidden, n_features)
+        self.fc2 = nn.Linear(n_features, n_features)
 
     def forward(self, input, _):
-        hidden = torch.nn.functional.relu(self.fc1(input))
+        hidden = torch.nn.functional.leaky_relu(self.fc1(input))
         return self.fc2(hidden).squeeze(dim=0)
 
 

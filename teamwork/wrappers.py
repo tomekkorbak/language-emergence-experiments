@@ -31,10 +31,7 @@ class GSSequentialTeamworkGame(nn.Module):
         message = self.sender_ensemble(sender_input, agent_indices=indices)
         first_receiver_output = self.first_receiver_ensemble(message, agent_indices=indices)[:, -1, ...]
         second_receiver_output = self.second_receiver_ensemble(message, agent_indices=indices)[:, -1, ...]
-        loss_1, rest_info_1 = self.loss(target[0], first_receiver_output, idx=1)
-        loss_2, rest_info_2 = self.loss(target[1], second_receiver_output, idx=2)
-        loss, rest_info = loss_1 + loss_2, {**rest_info_1, **rest_info_2}
-        rest_info['accuracy'] = (rest_info['accuracy_1'] + rest_info['accuracy_2'])/2
+        loss, rest_info = self.loss(target, first_receiver_output, second_receiver_output)
         advantage = (loss.detach() - self.mean_baseline)
         policy_loss = (advantage * executive_sender_log_prob).mean()
         entropy_loss = -executive_sender_entropy.mean() * self.executive_sender_entropy_coeff
