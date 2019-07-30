@@ -24,9 +24,9 @@ def get_params():
     parser.add_argument('--population_size', type=int, default=2,
                         help='Population size (default: 3)')
 
-    parser.add_argument('--sender_hidden', type=int, default=100,
+    parser.add_argument('--sender_hidden', type=int, default=200,
                         help='Size of the hidden layer of Sender (default: 200)')
-    parser.add_argument('--receiver_hidden', type=int, default=100,
+    parser.add_argument('--receiver_hidden', type=int, default=200,
                         help='Size of the hidden layer of Receiver (default: 200)')
     parser.add_argument('--sender_embedding', type=int, default=5,
                         help='Dimensionality of the embedding hidden layer for Sender (default: 5)')
@@ -42,7 +42,7 @@ def get_params():
                         help="Learning rate for Executive sender's parameters (default: 1e-2)")
     parser.add_argument('--receiver_lr', type=float, default=0.001,
                         help="Learning rate for Receiver's parameters (default: 1e-2)")
-    parser.add_argument('--seed', type=int, default=117,
+    parser.add_argument('--seed', type=int, default=119,
                         help="Random seed")
     parser.add_argument('--use_reinforce', type=bool, default=False,
                         help="Whether to use Reinforce or Gumbel-Softmax for optimizing sender and receiver."
@@ -110,12 +110,14 @@ if __name__ == "__main__":
     executive_sender_params = [{'params': executive_sender.parameters(), 'lr': opts.executive_sender_lr}]
     receivers_params = [{'params': receiver_ensemble_1.parameters(), 'lr': opts.receiver_lr},
                         {'params': receiver_ensemble_2.parameters(), 'lr': opts.receiver_lr}]
-    optimizer = torch.optim.Adam(sender_params + receivers_params + executive_sender_params, weight_decay=1e-5)
+    optimizer = torch.optim.Adam(sender_params + receivers_params + executive_sender_params, weight_decay=1e-6)
 
     neptune.init('tomekkorbak/compositionality')
-    with neptune.create_experiment(params=vars(opts), upload_source_files=get_filepaths(), tags=['grd2']) as experiment:
+    with neptune.create_experiment(params=vars(opts), upload_source_files=get_filepaths(), tags=[]) as experiment:
         trainer = core.Trainer(game=game, optimizer=optimizer, train_data=train_loader, validation_data=test_loader,
                                callbacks=[CompositionalityMeasurer(experiment, full_dataset, opts, test.indices),
                                           NeptuneMonitor(experiment=experiment),
-                                          core.ConsoleLogger(print_train_loss=True)])
+                                          core.ConsoleLogger(print_train_loss=True),
+                                          # TemperatureUpdater(experiment, agent=senders[0], decay=0.999, minimum=0.5)
+                                          ])
         trainer.train(n_epochs=opts.n_epochs)

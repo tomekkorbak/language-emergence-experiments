@@ -19,7 +19,7 @@ cryptography==2.7
 cycler==0.10.0
 decorator==4.4.0
 docutils==0.14
--e git+https://github.com/tomekkorbak/EGG.git@new-callback-api#egg=EGG
+-e git+https://github.com/facebookresearch/EGG.git#egg=EGG
 entrypoints==0.3
 future==0.17.1
 gitdb2==2.0.5
