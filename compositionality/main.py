@@ -1,7 +1,6 @@
 import argparse
 
 import torch
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from egg import core
 import neptune
@@ -20,21 +19,21 @@ def get_params():
     parser.add_argument('--n_attributes', type=int, default=2,
                         help='Number of attributes (default: 2')
     parser.add_argument('--batches_per_epoch', type=int, default=1000,
-                        help='Number of batches per epoch (default: 1)')
+                        help='Number of batches per epoch (default: 1000)')
     parser.add_argument('--sender_hidden', type=int, default=200,
                         help='Size of the hidden layer of Sender (default: 200)')
     parser.add_argument('--receiver_hidden', type=int, default=200,
                         help='Size of the hidden layer of Receiver (default: 200)')
     parser.add_argument('--sender_embedding', type=int, default=10,
-                        help='Dimensionality of the embedding hidden layer for Sender (default: 5)')
+                        help='Dimensionality of the embedding hidden layer for Sender (default: 10)')
     parser.add_argument('--receiver_embedding', type=int, default=10,
-                        help='Dimensionality of the embedding hidden layer for Receiver (default: 5)')
+                        help='Dimensionality of the embedding hidden layer for Receiver (default: 10)')
     parser.add_argument('--rnn_cell', type=str, default='rnn')
     parser.add_argument('--sender_lr', type=float, default=0.001,
-                        help="Learning rate for Sender's parameters (default: 1e-2)")
+                        help="Learning rate for Sender's parameters (default: 1e-3)")
     parser.add_argument('--receiver_lr', type=float, default=0.001,
-                        help="Learning rate for Receiver's parameters (default: 1e-2)")
-    parser.add_argument('--seed', type=int, default=12192,
+                        help="Learning rate for Receiver's parameters (default: 1e-3)")
+    parser.add_argument('--seed', type=int, default=1771,
                         help="Random seed")
     parser.add_argument('--pretrain', type=bool, default=False,
                         help="")
@@ -85,7 +84,7 @@ if __name__ == "__main__":
                 game=pretraining_game, optimizer=optimizer, train_data=train_loader,
                 validation_data=test_loader,
                 callbacks=[
-                    NeptuneMonitor(experiment=experiment),
+                    NeptuneMonitor(),
                     core.ConsoleLogger(print_train_loss=True),
                 ])
             trainer.train(n_epochs=1_000)
@@ -99,8 +98,8 @@ if __name__ == "__main__":
         trainer = core.Trainer(game=compositional_game, optimizer=optimizer, train_data=train_loader,
                                validation_data=test_loader,
                                callbacks=[
-                                   CompositionalityMetric(experiment, full_dataset, opts, test.indices),
-                                   NeptuneMonitor(experiment=experiment),
+                                   CompositionalityMetric(full_dataset, opts, test.indices),
+                                   NeptuneMonitor(),
                                    core.ConsoleLogger(print_train_loss=True),
                                ])
-        trainer.train(n_epochs=10_000)
+        trainer.train(n_epochs=opts.n_epochs)
