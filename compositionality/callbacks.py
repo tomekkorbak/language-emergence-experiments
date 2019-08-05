@@ -4,11 +4,11 @@ from neptunecontrib.monitoring.utils import send_figure
 import neptune
 import seaborn as sns
 import matplotlib.pyplot as plt
-from egg.core import Callback
+from egg.core import Callback, EarlyStopperAccuracy
 import torch
 from tabulate import tabulate
 
-from compositionality.metrics import compute_concept_symbol_matrix, compute_context_independence
+from compositionality.metrics import compute_concept_symbol_matrix, compute_context_independence, compute_representation_similarity
 
 
 class NeptuneMonitor(Callback):
@@ -31,11 +31,12 @@ class NeptuneMonitor(Callback):
 
 class CompositionalityMetric(Callback):
 
-    def __init__(self, dataset, opts, test_indices):
+    def __init__(self, dataset, opts, test_indices, prefix=''):
         self.dataset = dataset
         self.epoch_counter = 0
         self.opts = opts
         self.test_indices = test_indices
+        self.prefix = prefix
 
     def on_epoch_end(self, *args):
         self.epoch_counter += 1
@@ -46,31 +47,41 @@ class CompositionalityMetric(Callback):
             self.trainer.game.train(mode=False)
             for _ in range(10):
                 self.run_inference()
-            self.concept_symbol_matrix = compute_concept_symbol_matrix(self.input_to_message, self.opts)
+            self.concept_symbol_matrix, concepts = compute_concept_symbol_matrix(
+                self.input_to_message,
+                input_dimensions=[self.opts.n_features] * self.opts.n_attributes,
+                vocab_size=self.opts.vocab_size
+            )
             self.trainer.game.train(mode=train_state)
             self.print_table_input_to_message()
             self.draw_concept_symbol_matrix()
 
             # Context independence metrics
-            context_independence_scores, v_cs = compute_context_independence(self.concept_symbol_matrix, self.opts)
-            neptune.send_metric('context independence', context_independence_scores.mean(dim=0))
-            neptune.send_text('v_cs', str(v_cs.tolist()))
-            neptune.send_text('context independence scores', str(context_independence_scores.tolist()))
+            context_independence_scores, v_cs = compute_context_independence(
+                self.concept_symbol_matrix,
+                input_dimensions=[self.opts.n_features] * self.opts.n_attributes,
+            )
+            neptune.send_metric(self.prefix + 'context independence', context_independence_scores.mean(axis=0))
+            neptune.send_text(self.prefix + 'v_cs', str(v_cs.tolist()))
+            neptune.send_text(self.prefix + 'context independence scores', str(context_independence_scores.tolist()))
+
+            # RSA
+            correlation_coeff, p_value = compute_representation_similarity(
+                self.input_to_message,
+                input_dimensions=[self.opts.n_features] * self.opts.n_attributes
+            )
+            neptune.send_metric(self.prefix + 'RSA', correlation_coeff)
+            neptune.send_metric(self.prefix + 'RSA_p_value', p_value)
 
     def run_inference(self):
         with torch.no_grad():
             inputs, targets = self.dataset.tensors
-            messages = self.trainer.game.sender(inputs)
-            first_receiver_output = self.trainer.game.receiver_1(messages)[:, -1, ...]
-            second_receiver_output = self.trainer.game.receiver_2(messages)[:, -1, ...]
-            for i in range(inputs.size(0)):
+            messages = self.trainer.game.sender(inputs.flatten(1, 2))
+        for i in range(inputs.size(0)):
                 input = tuple(inputs[i].argmax(dim=1).tolist())
                 message = tuple(messages[i].argmax(dim=1).tolist())
-                output = tuple([first_receiver_output[i].argmax(dim=0).item(), second_receiver_output[i].argmax(dim=0).item()])
-                target = tuple(targets[i].tolist())
-                neptune.send_text('messages', f'{input} -> {message} -> {output} (expected {target})')
+                neptune.send_text(self.prefix + 'messages', f'{input} -> {message}')
                 self.input_to_message[input].append(message)
-                self.message_to_output[message].append(output)
 
     def print_table_input_to_message(self):
         table_data = [['x'] + list(range(self.opts.n_features))] + [[i] + [None] * self.opts.n_features for i in range(self.opts.n_features)]
@@ -78,7 +89,7 @@ class CompositionalityMetric(Callback):
             table_data[input1 + 1][input2 + 1] = '  '.join((' '.join((str(s) for s in message)) for message in set(messages)))
         for a, b in zip(range(self.opts.n_features), self.test_indices):
             table_data[a+1][(b % self.opts.n_features) + 1] = '*' + table_data[a+1][(b % self.opts.n_features) +1]
-        filename = f'input_to_message_{self.epoch_counter}'
+        filename = f'{self.prefix}input_to_message_{self.epoch_counter}.txt'
         with open(file=filename, mode='w', encoding='utf-8') as file:
             file.write(tabulate(table_data, tablefmt='fancy_grid'))
         neptune.send_artifact(filename)
@@ -86,26 +97,55 @@ class CompositionalityMetric(Callback):
     def draw_concept_symbol_matrix(self):
         figure, ax = plt.subplots(figsize=(20, 5))
         figure.suptitle(f'Concept-symbol matrix {self.epoch_counter}')
-        g = sns.heatmap(self.concept_symbol_matrix.numpy(), annot=True, fmt='.2f', ax=ax)
+        g = sns.heatmap(self.concept_symbol_matrix, annot=True, fmt='.2f', ax=ax)
         g.set_title(f'Concept-symbol matrix {self.epoch_counter}')
-        send_figure(figure, channel_name='concept_symbol_matrix')
+        send_figure(figure, channel_name=self.prefix + 'concept_symbol_matrix')
         plt.close()
 
 
-class TemperatureUpdater(Callback):
+class CompositionalityMetricPretraining2(CompositionalityMetric):
 
-    def __init__(self, agent, decay=0.9, minimum=0.1, update_frequency=1):
-        self.agent = agent
-        assert hasattr(agent, 'temperature'), 'Agent must have a `temperature` attribute'
-        assert not isinstance(agent.temperature, torch.nn.Parameter), \
-            'When using TemperatureUpdater `temperature` cannot be trainable'
-        self.decay = decay
-        self.minimum = minimum
-        self.update_frequency = update_frequency
-        self.epoch_counter = 0
+    def run_inference(self):
+        with torch.no_grad():
+            inputs, targets = self.dataset.tensors
+            messages = self.trainer.game.sender_1(inputs.flatten(1, 2))
+            for i in range(inputs.size(0)):
+                input = tuple(inputs[i].argmax(dim=1).tolist())
+                message = tuple(messages[i].argmax(dim=1).tolist())
+                neptune.send_text(self.prefix + 'messages', f'{input} -> {message}')
+                self.input_to_message[input].append(message)
 
-    def on_epoch_end(self, loss, rest):
-        self.epoch_counter += 1
-        if self.epoch_counter % self.update_frequency == 0:
-            self.agent.temperature = max(self.minimum, self.agent.temperature * self.decay)
-        neptune.send_metric('temperature', self.agent.temperature)
+
+class CompositionalityMetricPretraining3(CompositionalityMetric):
+
+    def run_inference(self):
+        with torch.no_grad():
+            inputs, targets = self.dataset.tensors
+            messages = self.trainer.game.sender_2(inputs.flatten(1, 2))
+            for i in range(inputs.size(0)):
+                input = tuple(inputs[i].argmax(dim=1).tolist())
+                message = tuple(messages[i].argmax(dim=1).tolist())
+                neptune.send_text(self.prefix + 'messages', f'{input} -> {message}')
+                self.input_to_message[input].append(message)
+
+
+class EarlyStopperAccuracy(EarlyStopperAccuracy):
+    """
+    Implements early stopping logic that stops training when a threshold on a metric
+    is achieved.
+    """
+    def __init__(self, threshold: float, field_name: str = 'acc', delay=5) -> None:
+        """
+        :param threshold: early stopping threshold for the validation set accuracy
+            (assumes that the loss function returns the accuracy under name `field_name`)
+        :param field_name: the name of the metric return by loss function which should be evaluated against stopping
+            criterion (default: "acc")
+        """
+        super(EarlyStopperAccuracy, self).__init__(threshold, field_name)
+        self.delay = delay
+
+    def should_stop(self) -> bool:
+        if len(self.trainer.validation_data) < self.delay:
+            return False
+        assert self.trainer.validation_data is not None, 'Validation data must be provided for early stooping to work'
+        return all(logs[self.field_name] > self.threshold for _, logs in self.validation_stats[:-self.delay])

@@ -16,16 +16,16 @@ class Sender(nn.Module):
         return self.fc2(hidden)
 
 
-
 class Receiver(nn.Module):
     def __init__(self, n_hidden, n_features, n_attributes):
         super(Receiver, self).__init__()
         self.fc1 = nn.Linear(n_hidden, n_features)
-        self.fc2 = nn.Linear(n_features, n_features)
+        self.fc2_1 = nn.Linear(n_features, n_features)
+        self.fc2_2 = nn.Linear(n_features, n_features)
 
     def forward(self, input, _):
         hidden = torch.nn.functional.leaky_relu(self.fc1(input))
-        return self.fc2(hidden).squeeze(dim=0)
+        return self.fc2_1(hidden).squeeze(dim=0), self.fc2_2(hidden).squeeze(dim=0)
 
 
 if __name__ == "__main__":
