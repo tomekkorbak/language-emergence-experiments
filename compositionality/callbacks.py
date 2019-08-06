@@ -40,7 +40,7 @@ class CompositionalityMetric(Callback):
 
     def on_epoch_end(self, *args):
         self.epoch_counter += 1
-        if self.epoch_counter % 100 == 0:
+        if self.epoch_counter % 1000 == 0:
             self.input_to_message = collections.defaultdict(list)
             self.message_to_output = collections.defaultdict(list)
             train_state = self.trainer.game.training  # persist so we restore it back
@@ -76,7 +76,7 @@ class CompositionalityMetric(Callback):
     def run_inference(self):
         with torch.no_grad():
             inputs, targets = self.dataset.tensors
-            messages = self.trainer.game.sender(inputs.flatten(1, 2))
+            messages = self.trainer.game.sender(inputs)
         for i in range(inputs.size(0)):
                 input = tuple(inputs[i].argmax(dim=1).tolist())
                 message = tuple(messages[i].argmax(dim=1).tolist())
@@ -108,7 +108,7 @@ class CompositionalityMetricPretraining2(CompositionalityMetric):
     def run_inference(self):
         with torch.no_grad():
             inputs, targets = self.dataset.tensors
-            messages = self.trainer.game.sender_1(inputs.flatten(1, 2))
+            messages = self.trainer.game.sender_1(inputs)
             for i in range(inputs.size(0)):
                 input = tuple(inputs[i].argmax(dim=1).tolist())
                 message = tuple(messages[i].argmax(dim=1).tolist())
@@ -121,7 +121,7 @@ class CompositionalityMetricPretraining3(CompositionalityMetric):
     def run_inference(self):
         with torch.no_grad():
             inputs, targets = self.dataset.tensors
-            messages = self.trainer.game.sender_2(inputs.flatten(1, 2))
+            messages = self.trainer.game.sender_2(inputs)
             for i in range(inputs.size(0)):
                 input = tuple(inputs[i].argmax(dim=1).tolist())
                 message = tuple(messages[i].argmax(dim=1).tolist())

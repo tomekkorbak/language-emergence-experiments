@@ -6,7 +6,7 @@ from egg import core
 import neptune
 from neptunecontrib.api.utils import get_filepaths
 
-from compositionality.games import PretrainingmGame, CompositionalGame, loss_diff, RnnReceiverGS
+from compositionality.games import PretrainingmGame, CompositionalGame, loss_diff, RnnReceiverGS, InputNoiseInjector
 from compositionality.callbacks import NeptuneMonitor, CompositionalityMetric, CompositionalityMetricPretraining2, CompositionalityMetricPretraining3, EarlyStopperAccuracy
 from compositionality.agents import Sender, Receiver
 from compositionality.data import prepare_datasets
@@ -37,6 +37,8 @@ def get_params():
                         help="Random seed")
     parser.add_argument('--pretrain', type=bool, default=False,
                         help="")
+    parser.add_argument('--noise_strategy', type=str, default='full_permutation',
+                        help="")
     parser.add_argument('--config', type=str, default=None)
 
     args = core.init(parser)
@@ -59,7 +61,9 @@ if __name__ == "__main__":
             max_len=1,
             temperature=3.,
             trainable_temperature=True,
-            cell=opts.rnn_cell)
+            cell=opts.rnn_cell,
+            force_eos=False
+        )
         for i in range(2)]
     sender_3 = core.RnnSenderGS(
             agent=Sender(opts.sender_hidden, opts.n_features, opts.n_attributes),
@@ -69,6 +73,7 @@ if __name__ == "__main__":
             max_len=2,
             temperature=3.,
             trainable_temperature=True,
+            force_eos=False,
             cell=opts.rnn_cell)
     receiver = RnnReceiverGS(
             agent=Receiver(opts.receiver_hidden, opts.n_features, opts.n_attributes),
@@ -83,7 +88,7 @@ if __name__ == "__main__":
         # Pretraining game
         if opts.pretrain:
             pretrained_senders = [sender_1, sender_2]
-            pretraining_game = PretrainingmGame(pretrained_senders, receiver, loss_diff)
+            pretraining_game = PretrainingmGame(pretrained_senders, receiver, loss_diff, InputNoiseInjector(opts.noise_strategy))
             sender_params = [{'params': sender.parameters(), 'lr': opts.sender_lr} for sender in pretrained_senders]
             receiver_params = [{'params': receiver.parameters(), 'lr': opts.receiver_lr}]
             optimizer = torch.optim.Adam(sender_params + receiver_params)
