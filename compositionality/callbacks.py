@@ -108,7 +108,7 @@ class CompositionalityMetricPretraining2(CompositionalityMetric):
     def run_inference(self):
         with torch.no_grad():
             inputs, targets = self.dataset.tensors
-            messages = self.trainer.game.sender_1(inputs)
+            messages = self.trainer.game.sender_1(inputs) if self.opts.noise_strategy != 'targeted' else self.trainer.game.sender_1(inputs[:, 0])
             for i in range(inputs.size(0)):
                 input = tuple(inputs[i].argmax(dim=1).tolist())
                 message = tuple(messages[i].argmax(dim=1).tolist())
@@ -121,7 +121,7 @@ class CompositionalityMetricPretraining3(CompositionalityMetric):
     def run_inference(self):
         with torch.no_grad():
             inputs, targets = self.dataset.tensors
-            messages = self.trainer.game.sender_2(inputs)
+            messages = self.trainer.game.sender_2(inputs) if self.opts.noise_strategy != 'targeted' else self.trainer.game.sender_2(inputs[:, 1])
             for i in range(inputs.size(0)):
                 input = tuple(inputs[i].argmax(dim=1).tolist())
                 message = tuple(messages[i].argmax(dim=1).tolist())

@@ -31,21 +31,11 @@ class InputNoiseInjector(nn.Module):
         super(InputNoiseInjector, self).__init__()
         self.strategy = strategy
 
-    def forward(self, input, dim=None):
-        permutation = torch.randperm(input.size()[-1])
+    def forward(self, input):
         if self.strategy == 'full_permutation':
-            return input[..., permutation] if dim == 'both' else input
-        if self.strategy == 'per_dimension_permutation':
-            if dim == 'both':
-                return input[..., permutation]
-            elif dim in [0, 1]:
-                input1 = input[:, 0, permutation] if dim == 0 else input[:, 0, :]
-                input2 = input[:, 1, permutation] if dim == 0 else input[:, 1, :]
-                return torch.stack([input1, input2], dim=1)
-            if dim is None:
-                return input
-        if self.strategy is None or self.strategy == 'no':
-            return input
+            permutation = torch.randperm(input.size()[-1])
+            return input[..., permutation]
+        return input
 
 
 class PretrainingmGame(nn.Module):
@@ -64,16 +54,48 @@ class PretrainingmGame(nn.Module):
 
     def forward(self, sender_input, target):
         if random.choice([True, False]):
-            message_1 = self.sender_1(self.noise_injector(sender_input, dim=1))
+            message_1 = self.sender_1(sender_input)
             with torch.no_grad():
-                message_2 = self.sender_2(self.noise_injector(sender_input, dim='both'))
+                message_2 = self.sender_2(self.noise_injector(sender_input))
             message = torch.cat([message_1, message_2], dim=1)
             first_receiver_output, second_receiver_output = self.receiver(message)
             loss, rest_info = simple_loss(target[:, 0], first_receiver_output[:, -1, ...], prefix='pretraining')
         else:
             with torch.no_grad():
-                message_1 = self.sender_1(self.noise_injector(sender_input, dim='both'))
-            message_2 = self.sender_2(self.noise_injector(sender_input, dim=0))
+                message_1 = self.sender_1(self.noise_injector(sender_input))
+            message_2 = self.sender_2(sender_input)
+            message = torch.cat([message_1, message_2], dim=1)
+            first_receiver_output, second_receiver_output = self.receiver(message)
+            loss, rest_info = simple_loss(target[:, 1], second_receiver_output[:, -1, ...], prefix='pretraining')
+        return loss.mean(), rest_info
+
+
+class PretrainingmGameWithTargetedNoise(nn.Module):
+    def __init__(
+            self,
+            senders,
+            receiver,
+            loss,
+            noise_injector=InputNoiseInjector(strategy='full_permutation')
+    ):
+        super(PretrainingmGameWithTargetedNoise, self).__init__()
+        self.sender_1, self.sender_2 = senders
+        self.receiver = receiver
+        self.loss = loss
+        self.noise_injector = noise_injector
+
+    def forward(self, sender_input, target):
+        if random.choice([True, False]):
+            message_1 = self.sender_1(sender_input[:, 0])
+            with torch.no_grad():
+                message_2 = self.sender_2(self.noise_injector(sender_input[:, 1]))
+            message = torch.cat([message_1, message_2], dim=1)
+            first_receiver_output, second_receiver_output = self.receiver(message)
+            loss, rest_info = simple_loss(target[:, 0], first_receiver_output[:, -1, ...], prefix='pretraining')
+        else:
+            with torch.no_grad():
+                message_1 = self.sender_1(self.noise_injector(sender_input[:, 0]))
+            message_2 = self.sender_2(sender_input[:, 1])
             message = torch.cat([message_1, message_2], dim=1)
             first_receiver_output, second_receiver_output = self.receiver(message)
             loss, rest_info = simple_loss(target[:, 1], second_receiver_output[:, -1, ...], prefix='pretraining')
@@ -93,7 +115,7 @@ class CompositionalGame(nn.Module):
         self.loss = loss
 
     def forward(self, sender_input, target):
-        message = self.sender(sender_input.flatten(1, 2))
+        message = self.sender(sender_input)
         first_receiver_output, second_receiver_output = self.receiver(message)
         loss, rest_info = self.loss(target, first_receiver_output[:, -1, ...], second_receiver_output[:, -1, ...], prefix='comp')
         return loss.mean(), rest_info

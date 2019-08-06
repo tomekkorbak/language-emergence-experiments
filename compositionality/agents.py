@@ -11,7 +11,8 @@ class Sender(nn.Module):
         self.fc2 = nn.Linear(n_attributes*n_features, n_hidden)
 
     def forward(self, input):
-        input = input.flatten(1, 2)
+        if input.dim() > 2:
+            input = input.flatten(1, 2)
         hidden = torch.nn.functional.leaky_relu(self.fc1(input))
         return self.fc2(hidden)
 

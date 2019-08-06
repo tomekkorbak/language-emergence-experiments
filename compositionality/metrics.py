@@ -104,6 +104,8 @@ if __name__ == "__main__":
     context_independence_scores, v_cs = compute_context_independence(concept_symbol_matrix)
     print(context_independence_scores.mean(axis=0))
 
+    assert distance((10, 15), (13, 15)) == 1
+
     input_dimensions = [3, 5]
     correlation_coeff, p_value = compute_representation_similarity(input_to_message, input_dimensions)
     print(correlation_coeff)

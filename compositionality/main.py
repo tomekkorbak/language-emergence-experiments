@@ -6,7 +6,7 @@ from egg import core
 import neptune
 from neptunecontrib.api.utils import get_filepaths
 
-from compositionality.games import PretrainingmGame, CompositionalGame, loss_diff, RnnReceiverGS, InputNoiseInjector
+from compositionality.games import PretrainingmGame, CompositionalGame, loss_diff, RnnReceiverGS, InputNoiseInjector, PretrainingmGameWithTargetedNoise
 from compositionality.callbacks import NeptuneMonitor, CompositionalityMetric, CompositionalityMetricPretraining2, CompositionalityMetricPretraining3, EarlyStopperAccuracy
 from compositionality.agents import Sender, Receiver
 from compositionality.data import prepare_datasets
@@ -52,24 +52,12 @@ if __name__ == "__main__":
     train_loader = DataLoader(train, batch_size=opts.batch_size, drop_last=False, shuffle=True)
     test_loader = DataLoader(test, batch_size=10, drop_last=False, shuffle=False)
 
-    sender_1, sender_2 = [
-        core.RnnSenderGS(
-            agent=Sender(opts.sender_hidden, opts.n_features, opts.n_attributes),
-            vocab_size=opts.vocab_size,
-            emb_dim=opts.sender_embedding,
-            n_hidden=opts.sender_hidden,
-            max_len=1,
-            temperature=3.,
-            trainable_temperature=True,
-            cell=opts.rnn_cell,
-            force_eos=False
-        )
-        for i in range(2)]
+
     sender_3 = core.RnnSenderGS(
             agent=Sender(opts.sender_hidden, opts.n_features, opts.n_attributes),
             vocab_size=opts.vocab_size,
-            emb_dim=opts.sender_embedding,
-            n_hidden=opts.sender_hidden,
+            embed_dim=opts.sender_embedding,
+            hidden_size=opts.sender_hidden,
             max_len=2,
             temperature=3.,
             trainable_temperature=True,
@@ -78,17 +66,45 @@ if __name__ == "__main__":
     receiver = RnnReceiverGS(
             agent=Receiver(opts.receiver_hidden, opts.n_features, opts.n_attributes),
             vocab_size=opts.vocab_size,
-            emb_dim=opts.receiver_embedding,
-            n_hidden=opts.receiver_hidden,
+            embed_dim=opts.receiver_embedding,
+            hidden_size=opts.receiver_hidden,
             cell=opts.rnn_cell)
 
     neptune.init('tomekkorbak/template-transfer')
-    with neptune.create_experiment(params=vars(opts), upload_source_files=get_filepaths(), tags=[]) as experiment:
+    with neptune.create_experiment(params=vars(opts), upload_source_files=get_filepaths(), tags=['witty_wittgenstein']) as experiment:
 
         # Pretraining game
         if opts.pretrain:
-            pretrained_senders = [sender_1, sender_2]
-            pretraining_game = PretrainingmGame(pretrained_senders, receiver, loss_diff, InputNoiseInjector(opts.noise_strategy))
+            if opts.noise_strategy == 'targeted':
+                pretrained_senders = [
+                    core.RnnSenderGS(
+                        agent=Sender(opts.sender_hidden, opts.n_features, 1),
+                        vocab_size=opts.vocab_size,
+                        embed_dim=opts.sender_embedding,
+                        hidden_size=opts.sender_hidden,
+                        max_len=1,
+                        temperature=3.,
+                        trainable_temperature=True,
+                        cell=opts.rnn_cell,
+                        force_eos=False
+                    )
+                    for i in range(2)]
+                pretraining_game = PretrainingmGameWithTargetedNoise(pretrained_senders, receiver, loss_diff, InputNoiseInjector('full_permutation'))
+            else:
+                pretrained_senders = [
+                    core.RnnSenderGS(
+                        agent=Sender(opts.sender_hidden, opts.n_features, opts.n_attributes),
+                        vocab_size=opts.vocab_size,
+                        embed_dim=opts.sender_embedding,
+                        hidden_size=opts.sender_hidden,
+                        max_len=1,
+                        temperature=3.,
+                        trainable_temperature=True,
+                        cell=opts.rnn_cell,
+                        force_eos=False
+                    )
+                    for i in range(2)]
+                pretraining_game = PretrainingmGame(pretrained_senders, receiver, loss_diff, InputNoiseInjector(opts.noise_strategy))
             sender_params = [{'params': sender.parameters(), 'lr': opts.sender_lr} for sender in pretrained_senders]
             receiver_params = [{'params': receiver.parameters(), 'lr': opts.receiver_lr}]
             optimizer = torch.optim.Adam(sender_params + receiver_params)
@@ -107,7 +123,7 @@ if __name__ == "__main__":
 
         # Compositional game
         assert sender_3.training
-        assert not receiver.training
+        receiver.train(not opts.pretrain)
         compositional_game = CompositionalGame(sender_3, receiver, loss=loss_diff)
         sender_params = [{'params': sender_3.parameters(), 'lr': opts.sender_lr}]
         receiver_params = [{'params': receiver.parameters(), 'lr': opts.receiver_lr * 0.01}]
