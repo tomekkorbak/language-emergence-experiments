@@ -1,4 +1,5 @@
 import random
+from collections import defaultdict
 
 import torch
 import torch.nn as nn
@@ -7,22 +8,23 @@ import torch.nn.functional as F
 from egg import core
 
 
-def loss_diff(targets, receiver_output_1, receiver_output_2, prefix):
+def entangled_loss(targets, receiver_output_1, receiver_output_2):
     acc_1 = (receiver_output_1.argmax(dim=1) == targets[:, 0]).detach().float()
     acc_2 = (receiver_output_2.argmax(dim=1) == targets[:, 1]).detach().float()
     loss_1 = F.cross_entropy(receiver_output_1, targets[:, 0], reduction="none")
     loss_2 = F.cross_entropy(receiver_output_2, targets[:, 1], reduction="none")
     acc = (acc_1 * acc_2).mean(dim=0)
     loss = loss_1 + loss_2
-    return loss, {f'{prefix}_accuracy': acc.item(),
-                  f'{prefix}_first_accuracy': acc_1.mean(dim=0).item(),
-                  f'{prefix}_second_accuracy': acc_2.mean(dim=0).item()}
+    return loss, {f'accuracy': acc.item(),
+                  f'first_accuracy': acc_1.mean(dim=0).item(),
+                  f'second_accuracy': acc_2.mean(dim=0).item()}
 
 
-def simple_loss(target, output, prefix):
+def disentangled_loss(target, output, prefix):
     acc = (output.argmax(dim=1) == target).detach().float().mean(dim=0)
     loss = F.cross_entropy(output, target, reduction="none")
-    return loss, {f'{prefix}_accuracy': acc.item()}
+    return loss, {f'{prefix}_accuracy': acc.item(), 'accuracy': acc.item()}
+
 
 
 class InputNoiseInjector(nn.Module):
@@ -38,18 +40,16 @@ class InputNoiseInjector(nn.Module):
         return input
 
 
-class PretrainingmGame(nn.Module):
+class PretrainingmGameGS(nn.Module):
     def __init__(
             self,
             senders,
             receiver,
-            loss,
             noise_injector=InputNoiseInjector(strategy='full_permutation')
     ):
-        super(PretrainingmGame, self).__init__()
+        super(PretrainingmGameGS, self).__init__()
         self.sender_1, self.sender_2 = senders
         self.receiver = receiver
-        self.loss = loss
         self.noise_injector = noise_injector
 
     def forward(self, sender_input, target):
@@ -59,93 +59,124 @@ class PretrainingmGame(nn.Module):
                 message_2 = self.sender_2(self.noise_injector(sender_input))
             message = torch.cat([message_1, message_2], dim=1)
             first_receiver_output, second_receiver_output = self.receiver(message)
-            loss, rest_info = simple_loss(target[:, 0], first_receiver_output[:, -1, ...], prefix='pretraining')
+            loss, rest_info = disentangled_loss(target[:, 0], first_receiver_output[:, -1, ...], prefix='pretraining')
         else:
             with torch.no_grad():
                 message_1 = self.sender_1(self.noise_injector(sender_input))
             message_2 = self.sender_2(sender_input)
             message = torch.cat([message_1, message_2], dim=1)
             first_receiver_output, second_receiver_output = self.receiver(message)
-            loss, rest_info = simple_loss(target[:, 1], second_receiver_output[:, -1, ...], prefix='pretraining')
+            loss, rest_info = disentangled_loss(target[:, 1], second_receiver_output[:, -1, ...], prefix='pretraining')
         return loss.mean(), rest_info
 
 
-class PretrainingmGameWithTargetedNoise(nn.Module):
+def bump(message):
+    return message + torch.zeros_like(message).fill_(10)
+
+class PretrainingmGameReinforce(nn.Module):
     def __init__(
             self,
             senders,
             receiver,
-            loss,
-            noise_injector=InputNoiseInjector(strategy='full_permutation')
+            noise_injector=InputNoiseInjector(strategy='no')
     ):
-        super(PretrainingmGameWithTargetedNoise, self).__init__()
+        super(PretrainingmGameReinforce, self).__init__()
         self.sender_1, self.sender_2 = senders
         self.receiver = receiver
-        self.loss = loss
         self.noise_injector = noise_injector
+        self.sender_entropy_coeff = 0.01
+
+        self.mean_baseline = defaultdict(float)
+        self.n_points = defaultdict(float)
 
     def forward(self, sender_input, target):
         if random.choice([True, False]):
-            message_1 = self.sender_1(sender_input[:, 0])
-            with torch.no_grad():
-                message_2 = self.sender_2(self.noise_injector(sender_input[:, 1]))
-            message = torch.cat([message_1, message_2], dim=1)
+            agent = 'first'
+            message, log_probs, entropy = self.sender_1(sender_input)
+            # with torch.no_grad():
+            #     message_2, _, _ = self.sender_2(sender_input)
+            #     message_2 = self.noise_injector(message_2)
+            message_2 = torch.zeros_like(message)
+            message = torch.cat([bump(message), message_2], dim=1)
             first_receiver_output, second_receiver_output = self.receiver(message)
-            loss, rest_info = simple_loss(target[:, 0], first_receiver_output[:, -1, ...], prefix='pretraining')
+            loss, rest_info = disentangled_loss(target[:, 0], first_receiver_output, prefix=agent)
+
         else:
-            with torch.no_grad():
-                message_1 = self.sender_1(self.noise_injector(sender_input[:, 0]))
-            message_2 = self.sender_2(sender_input[:, 1])
-            message = torch.cat([message_1, message_2], dim=1)
+            agent = 'second'
+            # with torch.no_grad():
+            #     message_1, _, _ = self.sender_1(sender_input)
+            #     message_1 = self.noise_injector(message_1)
+            #     message_1 = torch.zeros_like(message_1)
+            message, log_probs, entropy = self.sender_2(sender_input)
+            message_1 = torch.zeros_like(message)
+            message = torch.cat([bump(message_1), message], dim=1)
             first_receiver_output, second_receiver_output = self.receiver(message)
-            loss, rest_info = simple_loss(target[:, 1], second_receiver_output[:, -1, ...], prefix='pretraining')
-        return loss.mean(), rest_info
+            loss, rest_info = disentangled_loss(target[:, 1], second_receiver_output, prefix=agent)
+
+        policy_loss = ((loss.detach() - self.mean_baseline[agent]) * log_probs).mean()
+        entropy_loss = -entropy.mean() * self.sender_entropy_coeff
+
+        if self.training:
+            self.update_baseline(agent, loss)
+
+        full_loss = policy_loss + entropy_loss + loss.mean()
+
+        rest_info['baseline' + agent] = self.mean_baseline[agent]
+        rest_info['loss'] = loss.mean().item()
+        rest_info['sender_entropy'] = entropy.mean().item()
+        return full_loss.mean(), rest_info
+
+    def update_baseline(self, name, value):
+        self.n_points[name] += 1
+        self.mean_baseline[name] += (value.detach().mean().item() - self.mean_baseline[name]) / self.n_points[name]
 
 
-class CompositionalGame(nn.Module):
+class CompositionalGameGS(nn.Module):
     def __init__(
             self,
             sender,
             receiver,
-            loss,
     ):
-        super(CompositionalGame, self).__init__()
+        super(CompositionalGameGS, self).__init__()
         self.sender = sender
         self.receiver = receiver
-        self.loss = loss
 
     def forward(self, sender_input, target):
         message = self.sender(sender_input)
         first_receiver_output, second_receiver_output = self.receiver(message)
-        loss, rest_info = self.loss(target, first_receiver_output[:, -1, ...], second_receiver_output[:, -1, ...], prefix='comp')
+        loss, rest_info = entangled_loss(target, first_receiver_output[:, -1, ...], second_receiver_output[:, -1, ...])
         return loss.mean(), rest_info
 
 
-class RnnReceiverGS(core.RnnReceiverGS):
+class CompositionalGameReinforce(nn.Module):
+    def __init__(
+            self,
+            sender,
+            receiver,
+    ):
+        super(CompositionalGameReinforce, self).__init__()
+        self.sender = sender
+        self.receiver = receiver
+        self.sender_entropy_coeff = 0.2
 
-    def forward(self, message, input=None):
-        outputs1, outputs2 = [], []
+        self.mean_baseline = 0.0
+        self.n_points = 0.0
 
-        emb = self.embedding(message)
+    def forward(self, sender_input, target):
+        message, log_probs, entropy = self.sender(sender_input)
+        first_receiver_output, second_receiver_output = self.receiver(message)
+        loss, rest_info = entangled_loss(target, first_receiver_output, second_receiver_output)
 
-        prev_hidden = None
-        prev_c = None
+        policy_loss = ((loss.detach() - self.mean_baseline) * log_probs.sum(dim=1)).mean()
+        entropy_loss = -entropy.mean() * self.sender_entropy_coeff
 
-        # to get an access to the hidden states, we have to unroll the cell ourselves
-        for step in range(message.size(1)):
-            e_t = emb[:, step, ...]
-            if isinstance(self.cell, nn.LSTMCell):
-                h_t, prev_c = self.cell(e_t, (prev_hidden, prev_c)) if prev_hidden is not None else \
-                    self.cell(e_t)
-            else:
-                h_t = self.cell(e_t, prev_hidden)
-            output1, output2 = self.agent(h_t, input)
-            outputs1.append(output1)
-            outputs2.append(output2)
+        if self.training:
+            self.n_points += 1.0
+            self.mean_baseline += (loss.detach().mean().item() - self.mean_baseline) / self.n_points
 
-            prev_hidden = h_t
+        full_loss = policy_loss + entropy_loss + loss.mean()
 
-        outputs1 = torch.stack(outputs1).permute(1, 0, 2)
-        outputs2 = torch.stack(outputs2).permute(1, 0, 2)
-
-        return outputs1, outputs2
+        rest_info['baseline'] = self.mean_baseline
+        rest_info['loss'] = loss.mean().item()
+        rest_info['sender_entropy'] = entropy.mean().item()
+        return full_loss.mean(), rest_info

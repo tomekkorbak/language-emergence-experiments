@@ -13,30 +13,35 @@ from compositionality.metrics import compute_concept_symbol_matrix, compute_cont
 
 class NeptuneMonitor(Callback):
 
-    def __init__(self):
+    def __init__(self, prefix=None):
         self.epoch_counter = 0
+        self.prefix = prefix + '_' if prefix else ''
 
     def on_epoch_end(self, loss, rest):
         self.epoch_counter += 1
         if self.epoch_counter % 10 == 0:
-            neptune.send_metric(f'test_loss', loss)
+            neptune.send_metric(f'{self.prefix}test_loss', self.epoch_counter, loss)
             for metric, value in rest.items():
-                neptune.send_metric(f'train_{metric}', value)
+                neptune.send_metric(f'{self.prefix}train_{metric}', self.epoch_counter, value)
 
     def on_test_end(self, loss, rest):
-        neptune.send_metric(f'test_loss', loss)
+        neptune.send_metric(f'{self.prefix}test_loss', self.epoch_counter, loss)
         for metric, value in rest.items():
-            neptune.send_metric(f'test_{metric}', value)
+            neptune.send_metric(f'{self.prefix}test_{metric}', self.epoch_counter, value)
 
 
 class CompositionalityMetric(Callback):
 
-    def __init__(self, dataset, opts, test_indices, prefix=''):
+    def __init__(self, dataset, sender, opts, vocab_size, test_indices, prefix=''):
         self.dataset = dataset
+        self.sender = sender
         self.epoch_counter = 0
         self.opts = opts
+        self.vocab_size = vocab_size
         self.test_indices = test_indices
         self.prefix = prefix
+
+        self.epoch_counter = 0
 
     def on_epoch_end(self, *args):
         self.epoch_counter += 1
@@ -50,7 +55,7 @@ class CompositionalityMetric(Callback):
             self.concept_symbol_matrix, concepts = compute_concept_symbol_matrix(
                 self.input_to_message,
                 input_dimensions=[self.opts.n_features] * self.opts.n_attributes,
-                vocab_size=self.opts.vocab_size
+                vocab_size=self.vocab_size
             )
             self.trainer.game.train(mode=train_state)
             self.print_table_input_to_message()
@@ -61,7 +66,7 @@ class CompositionalityMetric(Callback):
                 self.concept_symbol_matrix,
                 input_dimensions=[self.opts.n_features] * self.opts.n_attributes,
             )
-            neptune.send_metric(self.prefix + 'context independence', context_independence_scores.mean(axis=0))
+            neptune.send_metric( self.prefix + 'context independence', self.epoch_counter, context_independence_scores.mean(axis=0))
             neptune.send_text(self.prefix + 'v_cs', str(v_cs.tolist()))
             neptune.send_text(self.prefix + 'context independence scores', str(context_independence_scores.tolist()))
 
@@ -70,10 +75,12 @@ class CompositionalityMetric(Callback):
                 self.input_to_message,
                 input_dimensions=[self.opts.n_features] * self.opts.n_attributes
             )
-            neptune.send_metric(self.prefix + 'RSA', correlation_coeff)
-            neptune.send_metric(self.prefix + 'RSA_p_value', p_value)
+            neptune.send_metric(self.prefix + 'RSA', self.epoch_counter, correlation_coeff)
+            neptune.send_metric(self.prefix + 'RSA_p_value', self.epoch_counter, p_value)
+
 
     def run_inference(self):
+        raise NotImplementedError()
         with torch.no_grad():
             inputs, targets = self.dataset.tensors
             messages = self.trainer.game.sender(inputs)
@@ -103,12 +110,12 @@ class CompositionalityMetric(Callback):
         plt.close()
 
 
-class CompositionalityMetricPretraining2(CompositionalityMetric):
+class CompositionalityMetricGS(CompositionalityMetric):
 
     def run_inference(self):
         with torch.no_grad():
             inputs, targets = self.dataset.tensors
-            messages = self.trainer.game.sender_1(inputs) if self.opts.noise_strategy != 'targeted' else self.trainer.game.sender_1(inputs[:, 0])
+            messages = self.sender(inputs)
             for i in range(inputs.size(0)):
                 input = tuple(inputs[i].argmax(dim=1).tolist())
                 message = tuple(messages[i].argmax(dim=1).tolist())
@@ -116,15 +123,15 @@ class CompositionalityMetricPretraining2(CompositionalityMetric):
                 self.input_to_message[input].append(message)
 
 
-class CompositionalityMetricPretraining3(CompositionalityMetric):
+class CompositionalityMetricReinforce(CompositionalityMetric):
 
     def run_inference(self):
         with torch.no_grad():
             inputs, targets = self.dataset.tensors
-            messages = self.trainer.game.sender_2(inputs) if self.opts.noise_strategy != 'targeted' else self.trainer.game.sender_2(inputs[:, 1])
+            messages, _, _ = self.sender(inputs)
             for i in range(inputs.size(0)):
                 input = tuple(inputs[i].argmax(dim=1).tolist())
-                message = tuple(messages[i].argmax(dim=1).tolist())
+                message = tuple(messages[i].tolist())
                 neptune.send_text(self.prefix + 'messages', f'{input} -> {message}')
                 self.input_to_message[input].append(message)
 
@@ -145,7 +152,11 @@ class EarlyStopperAccuracy(EarlyStopperAccuracy):
         self.delay = delay
 
     def should_stop(self) -> bool:
-        if len(self.trainer.validation_data) < self.delay:
+        if len(self.validation_stats) < self.delay:
             return False
         assert self.trainer.validation_data is not None, 'Validation data must be provided for early stooping to work'
-        return all(logs[self.field_name] > self.threshold for _, logs in self.validation_stats[:-self.delay])
+        return all(logs[self.field_name] > self.threshold for _, logs in self.validation_stats[-self.delay:])
+
+    def on_train_end(self):
+        if self.should_stop():
+            print(f'Stopped early on epoch {self.epoch}')
