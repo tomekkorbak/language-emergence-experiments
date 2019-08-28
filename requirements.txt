@@ -91,3 +91,4 @@ vega==2.4.0
 wcwidth==0.1.7
 websocket-client==0.56.0
 zipp==0.5.2
+tqdm
