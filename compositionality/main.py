@@ -7,12 +7,13 @@ from egg import core
 import neptune
 from neptunecontrib.api.utils import get_filepaths
 
-from compositionality.games import PretrainingmGameReinforce, PretrainingmGameGS, CompositionalGameGS, CompositionalGameReinforce, InputNoiseInjector
-from compositionality.wrappers import RnnReceiverDeterministic
+from compositionality.games import PretrainingmGameReinforce, PretrainingmGameGS, CompositionalGameGS, CompositionalGameReinforce
+from compositionality.wrappers import RnnReceiverDeterministic, RnnReceiverGS
 from compositionality.callbacks import NeptuneMonitor, EarlyStopperAccuracy, CompositionalityMetricReinforce, CompositionalityMetricGS
-from compositionality.agents import Sender, Receiver
+from compositionality.agents import Sender, Receiver, VisualSender
 from compositionality.data import prepare_datasets
 
+from visual_compositionality.visual_data import prepare_datasets
 
 def get_params():
     parser = argparse.ArgumentParser()
@@ -37,9 +38,6 @@ def get_params():
                         help="Random seed")
     parser.add_argument('--pretrain', action='store_true', default=False, help="")
     parser.add_argument('--reinforce', action='store_true', default=False, help="")
-
-    parser.add_argument('--noise_strategy', type=str, default='full_permutation',
-                        help="")
     parser.add_argument('--config', type=str, default=None)
 
     args = core.init(parser)
@@ -50,9 +48,10 @@ def get_params():
 if __name__ == "__main__":
     opts = get_params()
     opts.on_slurm = os.environ.get('SLURM_JOB_NAME', False)
+    core.util._set_seed(opts.seed)
     full_dataset, train, test = prepare_datasets(opts.n_features, opts.n_attributes)
     train_loader = DataLoader(train, batch_size=opts.batch_size, drop_last=False, shuffle=True)
-    test_loader = DataLoader(test, batch_size=10, drop_last=False, shuffle=False)
+    test_loader = DataLoader(test, batch_size=opts.batch_size, drop_last=False, shuffle=False)
 
     if opts.reinforce:
         pretrained_senders = [
@@ -68,7 +67,7 @@ if __name__ == "__main__":
             for i in range(2)]
         sender_3 = core.RnnSenderReinforce(
             agent=Sender(opts.sender_hidden, opts.n_features, opts.n_attributes),
-            vocab_size=opts.vocab_size * 2,
+            vocab_size=opts.vocab_size,
             embed_dim=opts.sender_embedding,
             hidden_size=opts.sender_hidden,
             max_len=opts.max_len,
@@ -76,14 +75,14 @@ if __name__ == "__main__":
             cell=opts.rnn_cell)
         receiver = RnnReceiverDeterministic(
             agent=Receiver(opts.receiver_hidden, opts.n_features, opts.n_attributes),
-            vocab_size=opts.vocab_size * 2,
+            vocab_size=opts.vocab_size,
             embed_dim=opts.receiver_embedding,
             hidden_size=opts.receiver_hidden,
             cell=opts.rnn_cell)
     else:
         pretrained_senders = [
             core.RnnSenderGS(
-                agent=Sender(opts.sender_hidden, opts.n_features, opts.n_attributes),
+                agent=VisualSender(opts.sender_hidden, opts.n_features, opts.n_attributes),
                 vocab_size=opts.vocab_size,
                 embed_dim=opts.sender_embedding,
                 hidden_size=opts.sender_hidden,
@@ -95,7 +94,7 @@ if __name__ == "__main__":
             )
             for i in range(2)]
         sender_3 = core.RnnSenderGS(
-                agent=Sender(opts.sender_hidden, opts.n_features, opts.n_attributes),
+                agent=VisualSender(opts.sender_hidden, opts.n_features, opts.n_attributes),
                 vocab_size=opts.vocab_size,
                 embed_dim=opts.sender_embedding,
                 hidden_size=opts.sender_hidden,
@@ -104,7 +103,7 @@ if __name__ == "__main__":
                 trainable_temperature=True,
                 force_eos=False,
                 cell=opts.rnn_cell)
-        receiver = core.RnnReceiverGS(
+        receiver = RnnReceiverGS(
                 agent=Receiver(opts.receiver_hidden, opts.n_features, opts.n_attributes),
                 vocab_size=opts.vocab_size,
                 embed_dim=opts.receiver_embedding,
@@ -112,12 +111,12 @@ if __name__ == "__main__":
                 cell=opts.rnn_cell)
 
     neptune.init('tomekkorbak/template-transfer')
-    with neptune.create_experiment(params=vars(opts), upload_source_files=get_filepaths(), tags=['awesome_anscombe']) as experiment:
+    with neptune.create_experiment(params=vars(opts), upload_source_files=get_filepaths(), tags=['rrr']) as experiment:
         CompositionalityMetric = CompositionalityMetricReinforce if opts.reinforce else CompositionalityMetricGS
 
         # Pretraining game
         if opts.pretrain:
-            pretraining_game = PretrainingmGameReinforce(pretrained_senders, receiver, InputNoiseInjector(opts.noise_strategy)) if opts.reinforce else PretrainingmGameGS(pretrained_senders, receiver, InputNoiseInjector(opts.noise_strategy))
+            pretraining_game = PretrainingmGameReinforce(pretrained_senders, receiver) if opts.reinforce else PretrainingmGameGS(pretrained_senders, receiver)
             sender_params = [{'params': sender.parameters(), 'lr': opts.sender_lr} for sender in pretrained_senders]
             receiver_params = [{'params': receiver.parameters(), 'lr': opts.receiver_lr}]
             optimizer = torch.optim.Adam(sender_params + receiver_params)
@@ -125,26 +124,24 @@ if __name__ == "__main__":
                 game=pretraining_game, optimizer=optimizer, train_data=train_loader,
                 validation_data=test_loader,
                 callbacks=[
-                    CompositionalityMetric(full_dataset, pretrained_senders[0], opts, 10, test.indices, prefix='1_'),
-                    CompositionalityMetric(full_dataset, pretrained_senders[1], opts, 10, test.indices, prefix='2_'),
+                    CompositionalityMetric(full_dataset, pretrained_senders[0], opts, opts.vocab_size, prefix='1_'),
+                    CompositionalityMetric(full_dataset, pretrained_senders[1], opts, opts.vocab_size, prefix='2_'),
                     NeptuneMonitor(prefix='pretrain'),
                     core.ConsoleLogger(print_train_loss=not opts.on_slurm),
-                    EarlyStopperAccuracy(threshold=0.95, field_name='accuracy'),
+                    EarlyStopperAccuracy(threshold=0.85, field_name='accuracy', delay=2),
                 ])
             trainer.train(n_epochs=500_000)
             pretraining_game.train(False)
 
         # Compositional game
-        assert sender_3.training
-        receiver.train(not opts.pretrain)
         compositional_game = CompositionalGameReinforce(sender_3, receiver) if opts.reinforce else CompositionalGameGS(sender_3, receiver)
         sender_params = [{'params': sender_3.parameters(), 'lr': opts.sender_lr}]
-        receiver_params = [{'params': receiver.parameters(), 'lr': opts.receiver_lr}]
+        receiver_params = [{'params': receiver.parameters(), 'lr': opts.receiver_lr * 0.5}]
         optimizer = torch.optim.Adam(sender_params + receiver_params)
         trainer = core.Trainer(game=compositional_game, optimizer=optimizer, train_data=train_loader,
                                validation_data=test_loader,
                                callbacks=[
-                                   CompositionalityMetric(full_dataset, sender_3, opts, 20, test.indices, prefix='comp'),
+                                   CompositionalityMetric(full_dataset, sender_3, opts, opts.vocab_size, prefix='comp'),
                                    NeptuneMonitor(prefix='comp'),
                                    core.ConsoleLogger(print_train_loss=not opts.on_slurm),
                                ])

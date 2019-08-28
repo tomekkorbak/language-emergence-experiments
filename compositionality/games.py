@@ -23,21 +23,13 @@ def entangled_loss(targets, receiver_output_1, receiver_output_2):
 def disentangled_loss(target, output, prefix):
     acc = (output.argmax(dim=1) == target).detach().float().mean(dim=0)
     loss = F.cross_entropy(output, target, reduction="none")
-    return loss, {f'{prefix}_accuracy': acc.item(), 'accuracy': acc.item()}
+    return loss, {f'{prefix}_accuracy': acc.item()}
 
 
-
-class InputNoiseInjector(nn.Module):
-
-    def __init__(self, strategy: str = None):
-        super(InputNoiseInjector, self).__init__()
-        self.strategy = strategy
-
-    def forward(self, input):
-        if self.strategy == 'full_permutation':
-            permutation = torch.randperm(input.size()[-1])
-            return input[..., permutation]
-        return input
+def sample(message_size):
+    batch_size, _, vocab_size = message_size
+    random_symbols = torch.randint(0, vocab_size, size=(batch_size,))
+    return F.one_hot(random_symbols, num_classes=vocab_size).float().unsqueeze(dim=1)
 
 
 class PretrainingmGameGS(nn.Module):
@@ -45,29 +37,29 @@ class PretrainingmGameGS(nn.Module):
             self,
             senders,
             receiver,
-            noise_injector=InputNoiseInjector(strategy='full_permutation')
     ):
         super(PretrainingmGameGS, self).__init__()
         self.sender_1, self.sender_2 = senders
         self.receiver = receiver
-        self.noise_injector = noise_injector
 
     def forward(self, sender_input, target):
-        if random.choice([True, False]):
-            message_1 = self.sender_1(sender_input)
-            with torch.no_grad():
-                message_2 = self.sender_2(self.noise_injector(sender_input))
-            message = torch.cat([message_1, message_2], dim=1)
-            first_receiver_output, second_receiver_output = self.receiver(message)
-            loss, rest_info = disentangled_loss(target[:, 0], first_receiver_output[:, -1, ...], prefix='pretraining')
-        else:
-            with torch.no_grad():
-                message_1 = self.sender_1(self.noise_injector(sender_input))
-            message_2 = self.sender_2(sender_input)
-            message = torch.cat([message_1, message_2], dim=1)
-            first_receiver_output, second_receiver_output = self.receiver(message)
-            loss, rest_info = disentangled_loss(target[:, 1], second_receiver_output[:, -1, ...], prefix='pretraining')
-        return loss.mean(), rest_info
+        message_1 = self.sender_1(sender_input)
+        message_2 = sample(message_1.size())
+        message = torch.cat([message_1, message_2], dim=1)
+        first_receiver_output, second_receiver_output = self.receiver(message)
+        loss_1, rest_info_1 = disentangled_loss(target[:, 0], first_receiver_output[:, -1, ...], prefix='first')
+
+        message_2 = self.sender_2(sender_input)
+        message_1 = sample(message_2.size())
+        message = torch.cat([message_1, message_2], dim=1)
+        first_receiver_output, second_receiver_output = self.receiver(message)
+        loss_2, rest_info_2 = disentangled_loss(target[:, 1], second_receiver_output[:, -1, ...], prefix='second')
+        rest = {
+            'first_accuracy': rest_info_1['first_accuracy'],
+            'second_accuracy': rest_info_2['second_accuracy'],
+            'accuracy': (rest_info_1['first_accuracy'] + rest_info_2['second_accuracy'])/2
+        }
+        return (loss_1 + loss_2).mean(), rest
 
 
 def bump(message):
@@ -78,12 +70,10 @@ class PretrainingmGameReinforce(nn.Module):
             self,
             senders,
             receiver,
-            noise_injector=InputNoiseInjector(strategy='no')
     ):
         super(PretrainingmGameReinforce, self).__init__()
         self.sender_1, self.sender_2 = senders
         self.receiver = receiver
-        self.noise_injector = noise_injector
         self.sender_entropy_coeff = 0.01
 
         self.mean_baseline = defaultdict(float)

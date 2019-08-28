@@ -1,7 +1,10 @@
 from typing import Tuple
+import os
 
 import torch
 import torch.nn as nn
+
+from visual_compositionality.pretrain import Vision
 
 
 class Sender(nn.Module):
@@ -17,12 +20,25 @@ class Sender(nn.Module):
         return self.fc2(hidden)
 
 
+class VisualSender(nn.Module):
+    def __init__(self, n_hidden, n_features, n_attributes):
+        super(VisualSender, self).__init__()
+        self.vision = Vision()
+        self.vision.load_state_dict(torch.load('visual_compositionality/vision_model.pth'))
+        self.fc = nn.Linear(25, n_hidden)
+
+    def forward(self, input):
+        with torch.no_grad():
+            embedding = self.vision.embedd(input)
+        return self.fc(embedding)
+
+
 class Receiver(nn.Module):
     def __init__(self, n_hidden, n_features, n_attributes):
         super(Receiver, self).__init__()
-        self.fc1 = nn.Linear(n_hidden, n_features)
-        self.fc2_1 = nn.Linear(n_features, n_features)
-        self.fc2_2 = nn.Linear(n_features, n_features)
+        self.fc1 = nn.Linear(n_hidden, n_features*4)
+        self.fc2_1 = nn.Linear(n_features*4, n_features)
+        self.fc2_2 = nn.Linear(n_features*4, n_features)
 
     def forward(self, input, _):
         hidden = torch.nn.functional.leaky_relu(self.fc1(input))
