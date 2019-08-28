@@ -20,16 +20,14 @@ class Agent(nn.Module):
 
 class AgentWrapper(nn.Module):
 
-    def __init__(self, agent, vocab_size, embed_dim, hidden_size, cell='rnn', num_layers=1, obverter_loss=None):
+    def __init__(self, agent, vocab_size, embed_dim, hidden_size, cell='rnn', num_layers=1, obverter_loss=None, vision_module=None):
         super(AgentWrapper, self).__init__()
         self.agent = agent
         self.encoder = RnnEncoder(vocab_size, embed_dim, hidden_size, cell, num_layers)
         self.vocab_size = vocab_size
         self.obverter_loss = obverter_loss
         self.max_len = 2
-
-        self.vision = Vision()
-        self.vision.load_state_dict(torch.load('visual_compositionality/vision_model.pth'))
+        self.vision = vision_module
 
     def forward(self, message):
         encoded = self.encoder(message)

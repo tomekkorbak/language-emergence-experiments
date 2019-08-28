@@ -98,7 +98,7 @@ if __name__ == "__main__":
             hidden_size=opts.receiver_hidden,
             cell=opts.rnn_cell,
             obverter_loss=entangled_loss,
-            # vision_module=Vision.from_pretrained('visual_compositionality/vision_model.pth') if opts.visual else None
+            vision_module=Vision.from_pretrained('visual_compositionality/vision_model.pth') if opts.visual else None
     ) for _ in range(2)]
     game = ObverterGame(agents=agents, max_len=2, vocab_size=opts.vocab_size, loss=entangled_loss)
     optimizer = torch.optim.Adam([{'params': agent.parameters(), 'lr': opts.lr} for agent in agents])
