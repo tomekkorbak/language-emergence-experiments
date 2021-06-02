@@ -86,7 +86,7 @@ torch==1.1.0
 torchvision==0.3.0
 traitlets==4.3.2
 typing-extensions==3.7.4
-urllib3==1.25.3
+urllib3==1.26.5
 vega==2.4.0
 wcwidth==0.1.7
 websocket-client==0.56.0
